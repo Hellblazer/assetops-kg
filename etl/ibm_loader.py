@@ -153,8 +153,10 @@ def _esc(val: Any) -> str:
     if isinstance(val, (int, float)):
         return str(val)
     s = str(val)
-    # Escape backslashes first, then double-quotes
+    # Escape backslashes first, then quotes, then control chars that would
+    # terminate a Cypher string literal mid-parse.
     s = s.replace("\\", "\\\\").replace('"', '\\"')
+    s = s.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
     return f'"{s}"'
 
 
@@ -162,6 +164,30 @@ def _props(d: Dict[str, Any]) -> str:
     """Build a Cypher property map literal: {key1: val1, key2: val2}."""
     parts = [f"{k}: {_esc(v)}" for k, v in d.items()]
     return "{" + ", ".join(parts) + "}"
+
+
+# Labels for which we MATCH-by-key during bulk loading. A property index on
+# each (label, key) pair turns those MATCH+CREATE round-trips from O(N) label
+# scans into O(1) lookups, which is what makes the loader's wall time linear
+# in the number of rows rather than quadratic.
+INDEXED_KEYS: List[tuple[str, str]] = [
+    ("Equipment", "equipment_id"),
+    ("WorkOrder", "wo_id"),
+    ("AlertEvent", "alert_key"),
+    ("AnomalyEvent", "anomaly_key"),
+    ("Event", "event_id"),
+]
+
+
+def _ensure_indexes(client: SamyamaClient, graph: str) -> None:
+    """Create property indexes used by the bulk-load MATCH steps. Idempotent:
+    re-creating an existing index raises, which we tolerate."""
+    for label, key in INDEXED_KEYS:
+        try:
+            client.query(f"CREATE INDEX ON :{label}({key})", graph)
+            logger.info("Created index :%s(%s)", label, key)
+        except RuntimeError as exc:
+            logger.debug("Index :%s(%s) already exists or failed: %s", label, key, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +350,11 @@ def _flush_wo_batch(
     batch: List[Dict[str, Any]],
     graph: str,
 ) -> tuple[int, int]:
-    """Create a batch of WorkOrder nodes and their FOR_EQUIPMENT edges."""
+    """Create a batch of WorkOrder nodes and their FOR_EQUIPMENT edges.
+
+    Property indexes on WorkOrder(wo_id) and Equipment(equipment_id) are
+    created upfront in load_ibm_data, so the MATCH below is O(1).
+    """
     created = 0
     edges = 0
     for row in batch:
@@ -344,10 +374,8 @@ def _flush_wo_batch(
             "duration": row.get("duration", ""),
             "actual_labor_hours": row.get("actual_labor_hours", ""),
         }
-
         client.query(f"CREATE (w:WorkOrder {_props(props)})", graph)
         created += 1
-
         eq_id = row.get("equipment_id", "").strip()
         if eq_id and eq_id in EQUIPMENT_MAP:
             client.query(
@@ -357,7 +385,6 @@ def _flush_wo_batch(
                 graph,
             )
             edges += 1
-
     return created, edges
 
 
@@ -385,7 +412,6 @@ def _load_alert_events(
             start_time = row.get("start_time", "").strip()
             end_time = row.get("end_time", "").strip()
 
-            # Use a composite key to allow multiple alerts
             alert_key = f"{eq_id}_{rule_id}_{start_time}"
             props = {
                 "alert_key": alert_key,
@@ -431,28 +457,19 @@ def _load_unified_events(
         reader = csv.DictReader(fh)
         for row in reader:
             event_id = row.get("event_id", "").strip()
-            event_group = row.get("event_group", "").strip()
-            event_category = row.get("event_category", "").strip()
-            event_type = row.get("event_type", "").strip()
-            description = row.get("description", "").strip()
             eq_id = row.get("equipment_id", "").strip()
-            eq_name = row.get("equipment_name", "").strip()
-            event_time = row.get("event_time", "").strip()
-
-            props: Dict[str, Any] = {
+            props = {
                 "event_id": event_id,
-                "event_group": event_group,
-                "event_category": event_category,
-                "event_type": event_type,
-                "description": description,
+                "event_group": row.get("event_group", "").strip(),
+                "event_category": row.get("event_category", "").strip(),
+                "event_type": row.get("event_type", "").strip(),
+                "description": row.get("description", "").strip(),
                 "equipment_id": eq_id,
-                "equipment_name": eq_name,
-                "event_time": event_time,
+                "equipment_name": row.get("equipment_name", "").strip(),
+                "event_time": row.get("event_time", "").strip(),
             }
-
             client.query(f"CREATE (ev:Event {_props(props)})", graph)
             event_count += 1
-
             if eq_id and eq_id in EQUIPMENT_MAP:
                 client.query(
                     f"MATCH (ev:Event {{event_id: {_esc(event_id)}}}), "
@@ -504,17 +521,14 @@ def _load_anomaly_events(
                 "kpi": kpi,
                 "asset_name": asset_name,
                 "anomaly_score": anomaly_score,
+                "value": value,
+                "upper_bound": upper_bound,
+                "lower_bound": lower_bound,
             }
-
-            # Store numeric values where possible
-            for field, raw in [("value", value), ("upper_bound", upper_bound),
-                               ("lower_bound", lower_bound)]:
-                props[field] = raw
 
             client.query(f"CREATE (an:AnomalyEvent {_props(props)})", graph)
             anomaly_count += 1
 
-            # Match asset_name case-insensitively to equipment
             eq_id = name_to_id.get(asset_name.lower())
             if eq_id:
                 client.query(
@@ -553,6 +567,10 @@ def load_ibm_data(
     logger.info("Loading IBM AssetOpsBench data from %s into graph '%s'", data_dir, graph)
 
     stats: Dict[str, int] = {}
+
+    # 0. Create property indexes so the row-by-row MATCH+CREATE-edge step
+    #    below stays O(1) per row instead of O(N) label scans.
+    _ensure_indexes(client, graph)
 
     # 1. Site / Location / Equipment hierarchy
     logger.info("Step 1/7: Loading asset hierarchy...")

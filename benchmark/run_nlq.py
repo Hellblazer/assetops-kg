@@ -58,9 +58,15 @@ async def _call_openai(
         raise ImportError("pip install openai")
 
     client = openai.AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
-    resp = await client.chat.completions.create(
-        model=model, messages=messages, max_tokens=max_tokens, temperature=0.0,
+    temperature = float(os.environ.get("NLQ_TEMPERATURE", "0.0"))
+    kwargs: dict[str, Any] = dict(
+        model=model, messages=messages,
+        max_tokens=max_tokens, temperature=temperature,
     )
+    seed_env = os.environ.get("NLQ_SEED")
+    if seed_env:
+        kwargs["seed"] = int(seed_env)
+    resp = await client.chat.completions.create(**kwargs)
     text = resp.choices[0].message.content or ""
     tokens = resp.usage.total_tokens if resp.usage else 0
     return text, tokens
