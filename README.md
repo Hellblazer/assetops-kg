@@ -7,6 +7,22 @@
 
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-blue" alt="License"></a>
 
+![AssetOps failure-impact demo](demo/assetops.gif)
+
+## Demo
+
+A narrated walkthrough (load the ISO 14224 + ISA-95 asset graph → most-critical
+equipment → DEPENDS_ON failure-impact propagation → triage of priority-1 work
+orders raised by high-severity anomalies):
+
+```bash
+python -m demo.demo                                                            # run live
+asciinema rec --overwrite --cols 92 --rows 32 --idle-time-limit 2.0 \
+  -c "bash -c 'source ~/projects/venv/bin/activate && PYTHONUNBUFFERED=1 python -m demo.demo'" \
+  demo/assetops.cast                                                           # re-record
+agg demo/assetops.cast demo/assetops.gif                                       # convert
+```
+
 ---
 
 IBM's GPT-4 agents score 65% on their own AssetOpsBench using flat document stores. We loaded the same data into a knowledge graph and asked:
