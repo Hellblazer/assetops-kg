@@ -203,32 +203,67 @@ def corpus_arg(product: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+# In-process batch indexer: one conexus-interpreter process loads the T3 client
+# (and embedder) ONCE, then loops db.put over every artifact. The per-artifact
+# `nx store put` CLI alternative pays nexus import + client init on every call —
+# measured ~30 min for SearchFlow vs ~25 s here (the model lives in the daemon;
+# the cost was process startup, not embedding). title=id so search hits map back.
+_BATCH_INDEX_DRIVER = textwrap.dedent(
+    """
+    import json, sys
+    from nexus.commands.store import _t3
+    from nexus.corpus import t3_collection_name
+    arts = json.load(open(sys.argv[1])); coll = sys.argv[2]
+    db = _t3(); col = t3_collection_name(coll, t3=db)
+    ok = 0
+    for a in arts:
+        if not a["text"].strip():
+            continue
+        db.put(collection=col, content=a["text"], title=a["id"], tags=a["tags"])
+        ok += 1
+    print("{sentinel}" + json.dumps({{"indexed": ok, "collection": col}}))
+    """
+).format(sentinel=_NXA_SENTINEL)
+
+
 def index_corpus(records: list[ArtifactRecord], product: str, limit: int | None) -> int:
     """Store each artifact in ``knowledge__herb-<product>`` with title=id.
 
-    Uses ``nx store put -`` (stdin) so a search hit's ``title`` recovers the
-    artifact id. Deliberately one-call-per-artifact for scaffold clarity;
-    a production loader would batch. Slow — use ``--limit`` for smoke tests.
+    Batches the whole corpus through a single conexus-interpreter process so the
+    T3 client/embedder initializes once (see ``_BATCH_INDEX_DRIVER``).
     """
+    import tempfile
+
+    if not CONEXUS_PYTHON.exists():
+        console.print(f"[red]conexus interpreter not found at {CONEXUS_PYTHON}; set NX_PYTHON[/red]")
+        return 0
     coll = collection_name(product)
     subset = records[:limit] if limit else records
-    console.print(f"Indexing {len(subset)} artifacts -> [cyan]knowledge__{coll}[/cyan] (this is slow; --limit to cap)")
+    payload = [
+        {"id": r.id, "text": r.text, "tags": f"herb,{product},{r.source_type}"}
+        for r in subset if r.text.strip()
+    ]
+    console.print(f"Indexing {len(payload)} artifacts -> [cyan]knowledge__{coll}[/cyan] (in-process batch)…")
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tf:
+        json.dump(payload, tf)
+        tmp = tf.name
+    try:
+        proc = subprocess.run(
+            [str(CONEXUS_PYTHON), "-c", _BATCH_INDEX_DRIVER, tmp, coll],
+            capture_output=True, timeout=1800, check=True,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        err = getattr(e, "stderr", b"") or b""
+        console.print(f"[red]batch index failed:[/red] {e}\n{err.decode()[-800:]}")
+        return 0
+    finally:
+        os.unlink(tmp)
     ok = 0
-    for i, rec in enumerate(subset, 1):
-        if not rec.text.strip():
-            continue
-        try:
-            subprocess.run(
-                ["nx", "store", "put", "-", "--collection", coll, "--title", rec.id,
-                 "--tags", f"herb,{product},{rec.source_type}", "--ttl", "permanent"],
-                input=rec.text.encode(), capture_output=True, timeout=120, check=True,
-            )
-            ok += 1
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-            logger.warning("store put failed for %s: %s", rec.id, e)
-        if i % 100 == 0:
-            console.print(f"  {i}/{len(subset)}")
-    console.print(f"[green]Indexed {ok}/{len(subset)} artifacts[/green]")
+    for line in proc.stdout.decode().splitlines():
+        if line.startswith(_NXA_SENTINEL):
+            res = json.loads(line[len(_NXA_SENTINEL):])
+            ok = res["indexed"]
+            console.print(f"[green]Indexed {ok} artifacts[/green] -> {res['collection']}")
     return ok
 
 
