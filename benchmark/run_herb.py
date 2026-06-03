@@ -55,6 +55,8 @@ import pickle
 import subprocess
 import sys
 import textwrap
+import time
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -100,19 +102,29 @@ class ArtifactRecord:
     title: str = ""
 
 
+def _slack_user(node: dict[str, Any]) -> dict[str, Any]:
+    """Slack message/reply bodies nest the author under ``Message.User``."""
+    return (node.get("Message") or node).get("User") or {}
+
+
 def _slack_text(msg: dict[str, Any]) -> str:
-    """Flatten a Slack message + its thread replies into searchable text."""
+    """Flatten a Slack message + its thread replies into searchable text.
+
+    Schema (verified against the HERB data): the body lives at
+    ``Message.User.{userId,text}``; ``ThreadReplies`` is empty across the whole
+    dataset but is handled defensively in case future products populate it.
+    """
     parts: list[str] = []
     channel = (msg.get("Channel") or {}).get("name", "")
     if channel:
         parts.append(f"[channel:{channel}]")
-    body = msg.get("Message") or {}
-    if body.get("text"):
-        parts.append(f"{body.get('User', {}).get('userId', '?')}: {body['text']}")
+    author = _slack_user(msg)
+    if author.get("text"):
+        parts.append(f"{author.get('userId', '?')}: {author['text']}")
     for reply in msg.get("ThreadReplies") or []:
-        rt = reply.get("text") or (reply.get("Message") or {}).get("text")
-        if rt:
-            parts.append(f"  reply {reply.get('userId', reply.get('User', {}).get('userId', '?'))}: {rt}")
+        ru = _slack_user(reply)
+        if ru.get("text"):
+            parts.append(f"  reply {ru.get('userId', '?')}: {ru['text']}")
     return "\n".join(parts)
 
 
@@ -172,7 +184,18 @@ def load_product(herb_dir: Path, product: str) -> dict[str, Any]:
 
 
 def collection_name(product: str) -> str:
+    """Bare collection name passed to ``nx store put --collection``."""
     return f"{COLLECTION_PREFIX}-{product.lower()}"
+
+
+def corpus_arg(product: str) -> str:
+    """Corpus selector for ``nx search``/``nx_answer``.
+
+    A bare name like ``herb-searchflow`` does NOT resolve; nexus matches the
+    ``<content_type>__<name>`` prefix. store_put routes to the ``knowledge__``
+    family, so retrieval must ask for ``knowledge__herb-<product>``.
+    """
+    return f"knowledge__{collection_name(product)}"
 
 
 # ---------------------------------------------------------------------------
@@ -221,10 +244,9 @@ def _artifact_id_from_title(title: str) -> str:
 
 def retrieve(question: str, product: str, k: int) -> list[str]:
     """Return up to ``k`` artifact ids ranked by nexus retrieval, deduped in order."""
-    coll = collection_name(product)
     try:
         proc = subprocess.run(
-            ["nx", "search", question, "--corpus", coll, "-m", str(k), "--json"],
+            ["nx", "search", question, "--corpus", corpus_arg(product), "-m", str(k), "--json"],
             capture_output=True, timeout=120, check=True,
         )
         hits = json.loads(proc.stdout.decode() or "[]")
@@ -305,7 +327,7 @@ def answer_question(question: str, product: str, k: int, arm: str, max_steps: in
     typed F1 will be near-zero because there is no real answer synthesis.
     """
     if arm == "nx_answer":
-        env = nx_answer_call(question, collection_name(product), max_steps, timeout)
+        env = nx_answer_call(question, corpus_arg(product), max_steps, timeout)
         return env.get("final_text") if env else None
     ids = retrieve(question, product, k)
     return " ".join(ids) if ids else None
@@ -314,6 +336,44 @@ def answer_question(question: str, product: str, k: int, arm: str, max_steps: in
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
+
+
+def _sh(cmd: list[str]) -> str:
+    try:
+        return subprocess.run(cmd, capture_output=True, timeout=30, check=True).stdout.decode().strip()
+    except Exception:
+        return ""
+
+
+def build_manifest(product: str, k: int, arm: str, n_questions: int, n_artifacts: int,
+                   herb_dir: Path) -> dict[str, Any]:
+    """Capture everything needed to reproduce and interpret a run.
+
+    Versioned alongside the results so a number is never orphaned from the
+    config that produced it: tool/model/backend identity, both repo SHAs,
+    the embedding model, and the isolation context.
+    """
+    embed_model = ""
+    for line in _sh(["nx", "doctor"]).splitlines():
+        if "Embedding model:" in line:
+            embed_model = line.split("Embedding model:")[-1].strip()
+            break
+    return {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "nx_version": _sh(["nx", "--version"]),
+        "embedding_model": embed_model,
+        "chroma_backend": "local" if os.environ.get("NX_LOCAL") == "1" else "cloud",
+        "nexus_config_dir": os.environ.get("NEXUS_CONFIG_DIR", "<default>"),
+        "local_chroma_path": os.environ.get("NX_LOCAL_CHROMA_PATH", "<default>"),
+        "assetops_sha": _sh(["git", "rev-parse", "--short", "HEAD"]),
+        "herb_sha": _sh(["git", "-C", str(herb_dir), "rev-parse", "--short", "HEAD"]),
+        "product": product,
+        "collection": corpus_arg(product),
+        "k": k,
+        "answer_arm": arm,
+        "n_questions": n_questions,
+        "n_artifacts": n_artifacts,
+    }
 
 
 @dataclass
@@ -349,32 +409,45 @@ def run_eval(product_json: dict[str, Any], product: str, k: int, limit: int | No
     ds = HerbDataset()
     recalls: list[float] = []
     by_type: dict[str, list[float]] = {}
+    per_question: list[dict[str, Any]] = []
 
     for i, q in enumerate(questions, 1):
         gold = q.get("citations", [])
+        t0 = time.monotonic()
         retrieved = retrieve(q["question"], product, k)
+        retr_ms = round((time.monotonic() - t0) * 1000)
         r = recall_at_k(retrieved, gold)
         recalls.append(r)
         by_type.setdefault(q.get("type", "?"), []).append(r)
 
+        t1 = time.monotonic()
+        answer = answer_question(q["question"], product, k, arm, max_steps, timeout)
+        ans_ms = round((time.monotonic() - t1) * 1000)
+
         ds.question.append(q["question"])
-        ds.answer.append(answer_question(q["question"], product, k, arm, max_steps, timeout))
+        ds.answer.append(answer)
         ds.ground_truth.append(q.get("ground_truth", ""))
         ds.citations.append(gold)
         ds.type.append(q.get("type", "?"))
+
+        per_question.append({
+            "question": q["question"], "type": q.get("type", "?"),
+            "gold_citations": gold, "retrieved_ids": retrieved,
+            "recall_at_k": r, "retrieval_ms": retr_ms, "answer_ms": ans_ms,
+            "answer_is_none": answer is None,
+        })
         if arm == "nx_answer":  # the slow arm — show progress
-            console.print(f"  [{i}/{len(questions)}] recall@{k}={r:.2f}  {q['question'][:60]}")
+            console.print(f"  [{i}/{len(questions)}] recall@{k}={r:.2f} ({retr_ms}ms+{ans_ms}ms)  {q['question'][:50]}")
 
     summary = {
-        "product": product,
-        "collection": f"knowledge__{collection_name(product)}",
         "questions_evaluated": len(questions),
-        "k": k,
-        "answer_arm": arm,
         "mean_recall_at_k": sum(recalls) / len(recalls) if recalls else 0.0,
         "recall_by_type": {t: sum(v) / len(v) for t, v in by_type.items()},
+        "count_by_type": {t: len(v) for t, v in by_type.items()},
+        "total_retrieval_ms": sum(p["retrieval_ms"] for p in per_question),
+        "total_answer_ms": sum(p["answer_ms"] for p in per_question),
     }
-    return {"summary": summary, "herb_dataset": ds.as_dict()}
+    return {"summary": summary, "per_question": per_question, "herb_dataset": ds.as_dict()}
 
 
 def print_stats(records: list[ArtifactRecord], product_json: dict[str, Any], product: str) -> None:
@@ -423,20 +496,30 @@ def main() -> None:
 
     # mode == eval
     console.print(f"\n[bold]Evaluating[/bold] (k={args.k}, limit={args.limit}, answer-arm={args.answer_arm})…")
+    n_q = len(product_json.get("answerable_questions", [])[: args.limit] if args.limit
+              else product_json.get("answerable_questions", []))
+    manifest = build_manifest(args.product, args.k, args.answer_arm, n_q, len(records), args.herb_dir)
     results = run_eval(product_json, args.product, args.k, args.limit,
                        args.answer_arm, args.max_steps, args.answer_timeout)
+    results = {"manifest": manifest, **results}
+    console.print("[bold]manifest:[/bold]")
+    console.print(json.dumps(manifest, indent=2))
+    console.print("[bold]summary:[/bold]")
     console.print(json.dumps(results["summary"], indent=2))
 
-    if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(results, indent=2))
-        console.print(f"[green]Wrote[/green] {args.output}")
-        # HERB's code/evaluate.py consumes a pickle of the dataset dict.
-        pkl = args.output.with_suffix(".pk")
-        with pkl.open("wb") as f:
-            pickle.dump(results["herb_dataset"], f)
-        console.print(f"[green]Wrote HERB-shaped pickle[/green] {pkl}  "
-                      f"(score with: python HERB/code/evaluate.py --output_file {pkl})")
+    # Versioned output path: results/herb/<product>-<arm>-<assetops_sha>.json by default.
+    out = args.output or (
+        Path("results/herb") / f"{args.product.lower()}-{args.answer_arm}-{manifest['assetops_sha']}.json"
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(results, indent=2))
+    console.print(f"[green]Wrote[/green] {out}")
+    # HERB's code/evaluate.py consumes a pickle of the dataset dict.
+    pkl = out.with_suffix(".pk")
+    with pkl.open("wb") as f:
+        pickle.dump(results["herb_dataset"], f)
+    console.print(f"[green]Wrote HERB-shaped pickle[/green] {pkl}  "
+                  f"(score with: python HERB/code/evaluate.py --output_file {pkl})")
 
 
 if __name__ == "__main__":
