@@ -296,11 +296,28 @@ def retrieve(question: str, product: str, k: int) -> list[str]:
     return seen
 
 
-def recall_at_k(retrieved: list[str], gold: list[str]) -> float:
-    if not gold:
+# HERB gold-citation sets are large and diffuse (SearchFlow: mean ~62 cited
+# artifacts/question, max 271 — a whole Slack thread). recall@10 is therefore
+# capped near 10/|gold| and badly understates retrieval; report several cutoffs
+# plus precision@10 and a hit-rate so the signal isn't one misleading number.
+RECALL_CUTOFFS = (10, 50, 100)
+
+
+def recall_at_k(retrieved: list[str], gold: list[str], k: int) -> float:
+    g = set(gold)
+    if not g:
         return 0.0
-    hit = len(set(retrieved) & set(gold))
-    return hit / len(set(gold))
+    return len(set(retrieved[:k]) & g) / len(g)
+
+
+def question_metrics(retrieved: list[str], gold: list[str], cutoffs: tuple[int, ...]) -> dict[str, float]:
+    g = set(gold)
+    top10 = retrieved[:10]
+    return {
+        **{f"recall@{k}": recall_at_k(retrieved, gold, k) for k in cutoffs},
+        "precision@10": (len(set(top10) & g) / len(top10)) if top10 else 0.0,
+        "hit@10": 1.0 if (set(top10) & g) else 0.0,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -352,20 +369,20 @@ def nx_answer_call(question: str, scope: str, max_steps: int, timeout: int) -> d
     return None
 
 
-def answer_question(question: str, product: str, k: int, arm: str, max_steps: int, timeout: int) -> str | None:
+def answer_question(question: str, product: str, arm: str, max_steps: int, timeout: int,
+                    retrieved: list[str]) -> str | None:
     """Produce a HERB-scorable answer string.
 
     ``arm="nx_answer"`` — the real arm: plan-match-first composed retrieval over
     the product collection. Returns nx_answer's ``final_text``.
-    ``arm="retrieval"`` — cheap v0 baseline: the ids of the top-k retrieved
-    artifacts joined. Useful for a zero-LLM-cost recall-only smoke run; entity-
-    typed F1 will be near-zero because there is no real answer synthesis.
+    ``arm="retrieval"`` — cheap v0 baseline: the already-retrieved artifact ids
+    joined (reuses the retrieval pass — no second query). Entity-typed F1 will
+    be near-zero because there is no real answer synthesis.
     """
     if arm == "nx_answer":
         env = nx_answer_call(question, corpus_arg(product), max_steps, timeout)
         return env.get("final_text") if env else None
-    ids = retrieve(question, product, k)
-    return " ".join(ids) if ids else None
+    return " ".join(retrieved) if retrieved else None
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +397,7 @@ def _sh(cmd: list[str]) -> str:
         return ""
 
 
-def build_manifest(product: str, k: int, arm: str, n_questions: int, n_artifacts: int,
+def build_manifest(product: str, depth: int, arm: str, n_questions: int, n_artifacts: int,
                    herb_dir: Path) -> dict[str, Any]:
     """Capture everything needed to reproduce and interpret a run.
 
@@ -404,7 +421,8 @@ def build_manifest(product: str, k: int, arm: str, n_questions: int, n_artifacts
         "herb_sha": _sh(["git", "-C", str(herb_dir), "rev-parse", "--short", "HEAD"]),
         "product": product,
         "collection": corpus_arg(product),
-        "k": k,
+        "retrieval_depth": depth,
+        "recall_cutoffs": [c for c in RECALL_CUTOFFS if c <= depth] or [depth],
         "answer_arm": arm,
         "n_questions": n_questions,
         "n_artifacts": n_artifacts,
@@ -428,35 +446,39 @@ class HerbDataset:
         }
 
 
-def run_eval(product_json: dict[str, Any], product: str, k: int, limit: int | None,
+def run_eval(product_json: dict[str, Any], product: str, depth: int, limit: int | None,
              arm: str, max_steps: int, timeout: int) -> dict[str, Any]:
     """Eval over the answerable questions.
 
-    Retrieval recall@k is always measured via `nx search` (title -> artifact id),
-    independent of the answer arm — it is the model-agnostic, near-zero-cost
-    signal. The answer arm (``retrieval`` or ``nx_answer``) only fills the
-    HERB ``answer`` field for downstream evaluate.py scoring.
+    Retrieval metrics are always measured via `nx search` (title -> artifact id),
+    independent of the answer arm — the model-agnostic, near-zero-cost signal.
+    The answer arm (``retrieval`` or ``nx_answer``) only fills the HERB ``answer``
+    field for downstream evaluate.py scoring.
     """
     questions = product_json.get("answerable_questions", [])
     if limit:
         questions = questions[:limit]
 
+    cutoffs = tuple(c for c in RECALL_CUTOFFS if c <= depth) or (depth,)  # fetch once at depth, slice
     ds = HerbDataset()
-    recalls: list[float] = []
-    by_type: dict[str, list[float]] = {}
+    metric_acc: dict[str, list[float]] = {}
+    by_type_r10: dict[str, list[float]] = {}
+    gold_sizes: list[int] = []
     per_question: list[dict[str, Any]] = []
 
     for i, q in enumerate(questions, 1):
         gold = q.get("citations", [])
+        gold_sizes.append(len(set(gold)))
         t0 = time.monotonic()
-        retrieved = retrieve(q["question"], product, k)
+        retrieved = retrieve(q["question"], product, depth)
         retr_ms = round((time.monotonic() - t0) * 1000)
-        r = recall_at_k(retrieved, gold)
-        recalls.append(r)
-        by_type.setdefault(q.get("type", "?"), []).append(r)
+        m = question_metrics(retrieved, gold, cutoffs)
+        for key, val in m.items():
+            metric_acc.setdefault(key, []).append(val)
+        by_type_r10.setdefault(q.get("type", "?"), []).append(m["recall@10"])
 
         t1 = time.monotonic()
-        answer = answer_question(q["question"], product, k, arm, max_steps, timeout)
+        answer = answer_question(q["question"], product, arm, max_steps, timeout, retrieved)
         ans_ms = round((time.monotonic() - t1) * 1000)
 
         ds.question.append(q["question"])
@@ -467,18 +489,24 @@ def run_eval(product_json: dict[str, Any], product: str, k: int, limit: int | No
 
         per_question.append({
             "question": q["question"], "type": q.get("type", "?"),
-            "gold_citations": gold, "retrieved_ids": retrieved,
-            "recall_at_k": r, "retrieval_ms": retr_ms, "answer_ms": ans_ms,
-            "answer_is_none": answer is None,
+            "gold_size": len(set(gold)), "gold_citations": gold,
+            "retrieved_ids": retrieved, **m,
+            "retrieval_ms": retr_ms, "answer_ms": ans_ms, "answer_is_none": answer is None,
         })
         if arm == "nx_answer":  # the slow arm — show progress
-            console.print(f"  [{i}/{len(questions)}] recall@{k}={r:.2f} ({retr_ms}ms+{ans_ms}ms)  {q['question'][:50]}")
+            console.print(f"  [{i}/{len(questions)}] r@10={m['recall@10']:.2f} hit={m['hit@10']:.0f} "
+                          f"({retr_ms}ms+{ans_ms}ms)  {q['question'][:46]}")
 
+    mean = lambda v: sum(v) / len(v) if v else 0.0  # noqa: E731
     summary = {
         "questions_evaluated": len(questions),
-        "mean_recall_at_k": sum(recalls) / len(recalls) if recalls else 0.0,
-        "recall_by_type": {t: sum(v) / len(v) for t, v in by_type.items()},
-        "count_by_type": {t: len(v) for t, v in by_type.items()},
+        "retrieval_depth": depth,
+        "metrics": {key: round(mean(vals), 4) for key, vals in metric_acc.items()},
+        "recall@10_by_type": {t: round(mean(v), 4) for t, v in by_type_r10.items()},
+        "count_by_type": {t: len(v) for t, v in by_type_r10.items()},
+        "gold_set_size": {"mean": round(mean(gold_sizes), 1), "max": max(gold_sizes, default=0)},
+        "note": "recall@10 is capped near 10/|gold|; mean |gold| is large, so read recall@50/100, "
+                "precision@10 and hit@10 alongside it.",
         "total_retrieval_ms": sum(p["retrieval_ms"] for p in per_question),
         "total_answer_ms": sum(p["answer_ms"] for p in per_question),
     }
@@ -509,7 +537,8 @@ def main() -> None:
                         help="prep: offline load+flatten+stats; index: materialize into nexus; eval: retrieve+recall")
     parser.add_argument("--herb-dir", type=Path, default=DEFAULT_HERB_DIR, help="Path to the cloned HERB repo")
     parser.add_argument("--product", default=DEFAULT_PRODUCT, help="Product corpus to use (e.g. SearchFlow)")
-    parser.add_argument("--k", type=int, default=10, help="Retrieval depth for recall@k")
+    parser.add_argument("--k", type=int, default=100, dest="depth",
+                        help="Max retrieval depth; recall reported at cutoffs 10/50/100 <= this (default 100)")
     parser.add_argument("--limit", type=int, default=None, help="Cap artifacts (index) or questions (eval) for smoke tests")
     parser.add_argument("--answer-arm", choices=["retrieval", "nx_answer"], default="retrieval",
                         help="retrieval: cheap recall-only baseline; nx_answer: real composed arm (slow, ~30s-4min/question)")
@@ -530,11 +559,11 @@ def main() -> None:
         return
 
     # mode == eval
-    console.print(f"\n[bold]Evaluating[/bold] (k={args.k}, limit={args.limit}, answer-arm={args.answer_arm})…")
+    console.print(f"\n[bold]Evaluating[/bold] (depth={args.depth}, limit={args.limit}, answer-arm={args.answer_arm})…")
     n_q = len(product_json.get("answerable_questions", [])[: args.limit] if args.limit
               else product_json.get("answerable_questions", []))
-    manifest = build_manifest(args.product, args.k, args.answer_arm, n_q, len(records), args.herb_dir)
-    results = run_eval(product_json, args.product, args.k, args.limit,
+    manifest = build_manifest(args.product, args.depth, args.answer_arm, n_q, len(records), args.herb_dir)
+    results = run_eval(product_json, args.product, args.depth, args.limit,
                        args.answer_arm, args.max_steps, args.answer_timeout)
     results = {"manifest": manifest, **results}
     console.print("[bold]manifest:[/bold]")
