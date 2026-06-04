@@ -1,0 +1,18 @@
+# Nexus per-repo indexing config.
+# Merged with built-in _DEFAULT_IGNORE (node_modules, __pycache__, dist,
+# build, .git, *.lock, ...) and honored alongside .gitignore (which already
+# excludes data/ and results/arxiv-runs/).
+#
+# Pattern semantics: a pattern with "/" matches the full relative path
+# (** = any depth); a pattern without "/" matches any path component.
+server:
+  ignorePatterns:
+    - "results/**"      # generated benchmark output dumps (27 JSON/CSV, ~3.5MB) — conclusions live in docs/
+    - ".serena/**"      # Serena tool state, not project content
+    - "demo/*.gif"      # rendered demo recording (binary)
+    - "demo/*.cast"     # asciinema capture (binary)
+    - "LICENSE"         # license text, not knowledge
+    # Note: scenarios/*.json and pyproject.toml are not indexed — the classifier
+    # only routes recognized code/prose extensions, so .json/.toml are skipped
+    # regardless of these patterns. The hand-authored scenario specs are
+    # rendered to scenarios/INDEX.md (committed) and indexed via `nx index md`.

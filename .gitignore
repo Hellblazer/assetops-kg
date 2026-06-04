@@ -20,3 +20,6 @@ results/arxiv-runs/
 # results/herb/*.json are versioned telemetry (committed); the binary HERB
 # pickles consumed by HERB/code/evaluate.py are intermediates.
 results/herb/*.pk
+
+# Serena tool state
+.serena/
