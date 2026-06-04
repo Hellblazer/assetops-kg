@@ -161,10 +161,26 @@ def main() -> None:
                         help="Score content questions with a local claude-as-judge Likert (0-100); slow (~12s/call)")
     parser.add_argument("--trials", type=int, default=1, help="Judge trials per content question (mean); default 1")
     parser.add_argument("--judge-timeout", type=int, default=120, help="Per-judge-call timeout (s)")
+    parser.add_argument("--output", type=Path, default=None,
+                        help="Persist the scored comparison to JSON (pins non-deterministic content Likert)")
     args = parser.parse_args()
 
     scored = [score_file(p, args.judge_content, args.trials, args.judge_timeout) for p in args.results]
     print(json.dumps(scored, indent=2))
+
+    if args.output:
+        sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True).stdout.decode().strip()
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps({
+            "scorer": "benchmark/score_herb.py",
+            "judged_content": args.judge_content,
+            "judge": "local claude-as-judge (non-deterministic; NOT HERB's GPT-4o)" if args.judge_content else None,
+            "trials": args.trials,
+            "assetops_sha": sha,
+            "inputs": [str(p) for p in args.results],
+            "results": scored,
+        }, indent=2))
+        print(f"\nWrote {args.output}")
 
     # compact comparison table
     types = ["person", "pr", "url"]
