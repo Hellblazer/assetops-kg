@@ -1,0 +1,55 @@
+{
+  "scorer": "benchmark/score_herb.py",
+  "judged_content": true,
+  "judge": "local claude-as-judge (non-deterministic; NOT HERB's GPT-4o)",
+  "trials": 1,
+  "assetops_sha": "b019f32",
+  "inputs": [
+    "results/herb/searchflow-retrieval-7938b48.json",
+    "results/herb/searchflow-nx_answer-full.json"
+  ],
+  "results": [
+    {
+      "file": "searchflow-retrieval-7938b48.json",
+      "answer_arm": "retrieval",
+      "f1_by_type": {
+        "person": 0.0,
+        "url": 0.0,
+        "pr": 0.0
+      },
+      "n_by_type": {
+        "person": 9,
+        "url": 1,
+        "pr": 12
+      },
+      "macro_f1_structured": 0.0,
+      "micro_f1_structured": 0.0,
+      "company_recall": 0.0,
+      "n_company": 7,
+      "content_likert_claude": 0.14,
+      "n_content": 14,
+      "n_content_judged": 14
+    },
+    {
+      "file": "searchflow-nx_answer-full.json",
+      "answer_arm": "nx_answer",
+      "f1_by_type": {
+        "person": 0.343,
+        "url": 0.0,
+        "pr": 0.2004
+      },
+      "n_by_type": {
+        "person": 9,
+        "url": 1,
+        "pr": 12
+      },
+      "macro_f1_structured": 0.1811,
+      "micro_f1_structured": 0.2496,
+      "company_recall": 0.0,
+      "n_company": 7,
+      "content_likert_claude": 19.0,
+      "n_content": 14,
+      "n_content_judged": 14
+    }
+  ]
+}

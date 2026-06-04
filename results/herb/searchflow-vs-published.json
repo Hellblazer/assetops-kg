@@ -1,0 +1,40 @@
+{
+  "comparison": "HERB SearchFlow \u2014 nexus (local, key-free) vs HERB published Table 2",
+  "scale": "0-100 per category; HERB numbers are single-attempt, aggregate over 30 products",
+  "comparability": "DIRECTIONAL, not point-exact: different judge (claude vs GPT-4o), different embedder (bge-768 vs text-embedding-3-large), SearchFlow-only vs 30-product aggregate, our company metric is recall-only.",
+  "assetops_sha": "fd8ba5c",
+  "herb_published_table2_single_attempt": {
+    "GPT-4o_ReAct": {
+      "People": 32.22,
+      "Customer": 23.45,
+      "Artifact": 41.35,
+      "Content": 34.81,
+      "Average": 32.96,
+      "unanswered_pct": 23.03
+    },
+    "best_of_9_llms_approx": {
+      "Average": 37.0,
+      "note": "20-attempt budget raises GPT-4o avg to 37.29"
+    }
+  },
+  "nexus_local_bge768_zero_metered_api": {
+    "People_person_F1x100": 34.3,
+    "Customer_company_recall_x100": 0.0,
+    "Artifact_pr_F1x100": 20.0,
+    "Artifact_url_F1x100": 0.0,
+    "Artifact_weighted": 18.5,
+    "Content_claude_likert": 20.0,
+    "Average_approx": 18.2,
+    "unanswered_pct": 0.0,
+    "note": "0% unanswered is not a win \u2014 the arm never abstains (HERB notes the accuracy/hallucination tradeoff)."
+  },
+  "headline": "On People search nexus (~34, local 768-dim, no metered API) matches GPT-4o agentic ReAct (~32). Trails on Customer/Artifact/Content; Customer=0 is an entity-emission/data-join gap (CUST-id not resolved to company name), not a retrieval failure \u2014 being addressed.",
+  "company_gap_diagnosis": {
+    "symptom": "company recall = 0; arm emits raw CUST-ids (CUST-0018) or hallucinates 'Salesforce', not gold names (FusionTech).",
+    "step1_fix_applied": "Indexed customer/employee ID->name records (load_entity_records); collection 1462 -> 1559 artifacts.",
+    "step1_result": "Necessary but NOT sufficient \u2014 company recall still 0.",
+    "root_cause": "Multi-hop join. Customer records ARE indexed and retrievable (verified: 'Customer CUST-0035: ... at company FusionTech'), but the single-pass nx_answer plan retrieves on the original question (surfacing issue artifacts with CUST-ids) and never issues the dependent second query to resolve CUST-id -> company name.",
+    "interpretation": "Concrete confirmation of HERB's thesis: source-aware MULTI-HOP retrieval is the bottleneck, not single-hop recall. The join data is present; a multi-hop-capable plan (retrieve issues -> extract CUST-ids -> retrieve those customer records -> emit names) or HERB's more-attempts strategy is required.",
+    "next_phase": "Add a dependent-retrieval plan step for ID->name resolution, or a re-query loop."
+  }
+}
