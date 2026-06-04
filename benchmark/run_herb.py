@@ -174,6 +174,42 @@ def flatten_artifacts(product: dict[str, Any]) -> list[ArtifactRecord]:
 # ---------------------------------------------------------------------------
 
 
+def load_entity_records(product_json: dict[str, Any], herb_dir: Path) -> list[ArtifactRecord]:
+    """Index the customer/employee ID->name mappings the corpus references.
+
+    HERB ``company`` questions need a two-hop join: an issue/bug names a customer
+    ID (``CUST-0089``), which resolves to a company name (``FusionTech``) via
+    ``metadata/customers_data.json``. Without these records indexed, the second
+    hop is impossible and the arm emits raw IDs. Scoped to the IDs this product
+    actually references (``product.customers`` / ``product.team``).
+    """
+    meta = herb_dir / "data" / "metadata"
+    recs: list[ArtifactRecord] = []
+    try:
+        cust = {c["id"]: c for c in json.loads((meta / "customers_data.json").read_text())}
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        cust = {}
+    for cid in product_json.get("customers", []):
+        c = cust.get(cid)
+        if c:
+            recs.append(ArtifactRecord(
+                cid, "customer",
+                f"Customer {cid}: contact {c.get('name', '')}, {c.get('role', '')} "
+                f"at company {c.get('company', '')}."))
+    try:
+        emp = json.loads((meta / "employee.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        emp = {}
+    for eid in product_json.get("team", []):
+        e = emp.get(eid) if isinstance(emp, dict) else None
+        if e:
+            recs.append(ArtifactRecord(
+                eid, "employee",
+                f"Employee {eid}: {e.get('name', '')}, {e.get('role', '')}, "
+                f"{e.get('location', '')}, org {e.get('org', '')}."))
+    return recs
+
+
 def load_product(herb_dir: Path, product: str) -> dict[str, Any]:
     path = herb_dir / "data" / "products" / f"{product}.json"
     if not path.exists():
@@ -447,7 +483,7 @@ class HerbDataset:
 
 
 def run_eval(product_json: dict[str, Any], product: str, depth: int, limit: int | None,
-             arm: str, max_steps: int, timeout: int) -> dict[str, Any]:
+             arm: str, max_steps: int, timeout: int, types: set[str] | None = None) -> dict[str, Any]:
     """Eval over the answerable questions.
 
     Retrieval metrics are always measured via `nx search` (title -> artifact id),
@@ -456,6 +492,8 @@ def run_eval(product_json: dict[str, Any], product: str, depth: int, limit: int 
     field for downstream evaluate.py scoring.
     """
     questions = product_json.get("answerable_questions", [])
+    if types:
+        questions = [q for q in questions if q.get("type") in types]
     if limit:
         questions = questions[:limit]
 
@@ -544,11 +582,12 @@ def main() -> None:
                         help="retrieval: cheap recall-only baseline; nx_answer: real composed arm (slow, ~30s-4min/question)")
     parser.add_argument("--max-steps", type=int, default=6, help="nx_answer plan DAG cap")
     parser.add_argument("--answer-timeout", type=int, default=320, help="Per-question nx_answer subprocess timeout (s)")
+    parser.add_argument("--types", default="", help="Comma-separated question types to evaluate (e.g. company,url); empty = all")
     parser.add_argument("--output", type=Path, default=None, help="Write eval results JSON here")
     args = parser.parse_args()
 
     product_json = load_product(args.herb_dir, args.product)
-    records = flatten_artifacts(product_json)
+    records = flatten_artifacts(product_json) + load_entity_records(product_json, args.herb_dir)
     print_stats(records, product_json, args.product)
 
     if args.mode == "prep":
@@ -560,11 +599,15 @@ def main() -> None:
 
     # mode == eval
     console.print(f"\n[bold]Evaluating[/bold] (depth={args.depth}, limit={args.limit}, answer-arm={args.answer_arm})…")
-    n_q = len(product_json.get("answerable_questions", [])[: args.limit] if args.limit
-              else product_json.get("answerable_questions", []))
+    types = {t.strip() for t in args.types.split(",") if t.strip()} or None
+    qs = product_json.get("answerable_questions", [])
+    if types:
+        qs = [q for q in qs if q.get("type") in types]
+    n_q = len(qs[: args.limit] if args.limit else qs)
     manifest = build_manifest(args.product, args.depth, args.answer_arm, n_q, len(records), args.herb_dir)
+    manifest["types_filter"] = sorted(types) if types else "all"
     results = run_eval(product_json, args.product, args.depth, args.limit,
-                       args.answer_arm, args.max_steps, args.answer_timeout)
+                       args.answer_arm, args.max_steps, args.answer_timeout, types)
     results = {"manifest": manifest, **results}
     console.print("[bold]manifest:[/bold]")
     console.print(json.dumps(manifest, indent=2))
