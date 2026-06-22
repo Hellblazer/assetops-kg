@@ -39,7 +39,6 @@ from rich.console import Console
 from benchmark.multihop_resolve import (  # type: ignore
     CORPUS,
     HERB_DIR,
-    _RE_COMPANY,
     _RE_CUST,
     _search,
     answer_company,
@@ -63,30 +62,38 @@ _E2E_BASELINE = 0.000
 
 
 def build_gold_fixtures() -> tuple[dict[str, str], dict[str, list[str]]]:
-    """Derive the two gold fixtures from the HERB SearchFlow source.
+    """Derive the two gold fixtures from the HERB source.
 
-    cust_to_company: every customer record's CUST-id -> company name. Parsed from
-    the same record text resolve_company() reads ("... at company C."). This is
-    the ground truth for P1 link correctness and P2 resolution accuracy.
+    cust_to_company: from the GLOBAL customer registry
+    ``data/metadata/customers_data.json`` — a 120-row list of
+    ``{"id": "CUST-xxxx", "company": ..., "name": ..., "role": ...}``. This is the
+    authoritative CUST->company truth: HERB products only carry a membership list of
+    bare CUST-id strings (``SearchFlow.json["customers"]``), so the registry, not
+    product document text, is the source. (The earlier draft scanned product
+    ``documents`` for an "... at company C." shape that HERB does not use — it
+    yielded 0 pairs against the real schema.)
 
-    question_to_affected_customers: each company question -> the set of CUST-ids
-    whose company is in the question's ground_truth. This is the ground truth for
-    P3 hop-1 precision (which customers SHOULD be surfaced for the question).
-    Derived by inverting cust_to_company against each question's gold companies.
+    question_to_affected_customers: each SearchFlow company-type question's
+    ``ground_truth`` is a list of company NAMES; invert it against cust_to_company to
+    get every CUST-id whose company is named. Inversion is GLOBAL (against all 120
+    registry customers), not restricted to SearchFlow's 29-entry membership list:
+    the registry is the customer universe and a company question asks which customers
+    (by company) are affected. Product-scoped inversion was considered and rejected —
+    it produces empty gold sets for some questions, which would make the P3 oracle
+    degenerate (and violate the non-empty-affected-set well-formedness assertion).
+    Verified 2026-06-21: all 7 SearchFlow company questions map fully (no missing
+    companies; affected sets 13..81).
     """
-    product = json.loads((HERB_DIR / "data/products/SearchFlow.json").read_text())
+    registry = json.loads(
+        (HERB_DIR / "data/metadata/customers_data.json").read_text()
+    )
+    cust_to_company: dict[str, str] = {
+        c["id"]: c["company"]
+        for c in registry
+        if c.get("id") and c.get("company")
+    }
 
-    # cust -> company: scan every customer artifact. The customer records are the
-    # documents matching the "Customer CUST-xxxx: ... at company C." shape. We pull
-    # them from the HERB source rather than the index so the fixture is independent
-    # of nexus state.
-    cust_to_company: dict[str, str] = {}
-    for art in product.get("documents", product.get("artifacts", [])):
-        text = art.get("text") or art.get("content") or ""
-        for cid in _RE_CUST.findall(text):
-            m = _RE_COMPANY.search(text)
-            if m:
-                cust_to_company[cid] = m.group(1).strip()
+    product = json.loads((HERB_DIR / "data/products/SearchFlow.json").read_text())
 
     # question -> affected CUST-ids: invert cust_to_company against gold companies.
     company_to_custs: dict[str, list[str]] = {}
