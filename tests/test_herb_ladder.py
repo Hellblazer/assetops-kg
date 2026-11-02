@@ -1,28 +1,34 @@
-"""RDR-147 benchmark-ladder RED contract.
+"""RDR-147 benchmark-ladder contract (Step 0, nexus-3lu23).
 
-These assertions are the TDD oracle for RDR-147. They are written FIRST and start
-RED; each implementation phase flips exactly one rung to GREEN while the downstream
-rungs stay RED with their recorded number — so a phase cannot close as "progress"
-while its successors are unverified (the load-bearing-jointness the RDR-147 gate
-hardened).
+Marked ``herb`` + ``integration``: excluded from default CI, run at each phase-review gate
+inside the sandbox, which must be up with ``knowledge__herb-searchflow`` indexed:
 
-Assertions are EXACT (``==``), never ``>=`` on the count side, so a silent-
-corruption regression cannot pass (feedback_exact_assertions_for_fixture_regression).
+    ./benchmark/herb_sandbox.sh up
+    ./benchmark/herb_sandbox.sh run python3 -m benchmark.run_herb --mode index
+    ./benchmark/herb_sandbox.sh run python3 -m pytest tests/test_herb_ladder.py
 
-Marked ``herb`` + ``integration``: excluded from default CI, run at each phase-
-review gate inside the sandbox. They require the HERB source at ~/git/HERB and the
-``knowledge__herb-searchflow`` corpus indexed.
+The tests that need nexus fail loudly when the sandbox is down (NxError); they never skip.
+Unit tests of the harness itself are in tests/test_herb_harness.py.
 
-    pytest -m herb tests/test_herb_ladder.py
+Assertions are EXACT (``==``), never ``>=`` on the count side, so a silent-corruption
+regression cannot pass. The recorded Step 0 baselines are in
+results/herb/step0-baselines.json; the script baseline is asserted equal to them.
 """
 
 from __future__ import annotations
 
+import json
+import re
+from pathlib import Path
+
 import pytest
 
 herb = pytest.importorskip("benchmark.herb_ladder", reason="assetops-kg benchmark pkg")
+from benchmark.run_herb import flatten_artifacts  # noqa: E402
 
 pytestmark = [pytest.mark.herb, pytest.mark.integration]
+
+_BASELINES = Path(__file__).parent.parent / "results" / "herb" / "step0-baselines.json"
 
 
 @pytest.fixture(scope="module")
@@ -31,27 +37,77 @@ def gold():
 
 
 @pytest.fixture(scope="module")
-def scorecard():
-    return herb.build_scorecard()
+def product():
+    return herb._load_product()
 
 
-# --- gold fixtures are well-formed (this rung is GREEN as soon as HERB exists) ---
+@pytest.fixture(scope="module")
+def recorded():
+    assert _BASELINES.exists(), f"{_BASELINES} is missing: run the ladder and commit its output"
+    return json.loads(_BASELINES.read_text())
 
 
-def test_gold_cust_to_company_is_complete(gold):
-    cust_to_company, _ = gold
-    # HERB SearchFlow ships exactly 120 customer records; lock the count.
-    assert len(cust_to_company) == 120
-    assert all(cid.startswith("CUST-") for cid in cust_to_company)
-    assert all(company for company in cust_to_company.values())
+# --- gold fixtures are well-formed (GREEN as soon as HERB exists; no nexus needed) ---
 
 
-def test_gold_questions_have_affected_customers(gold):
-    _, q_to_custs = gold
-    assert len(q_to_custs) > 0
-    # every company question must resolve to a non-empty gold affected-customer set,
-    # else P3 has nothing to grade against.
-    assert all(custs for custs in q_to_custs.values())
+def test_gold_registry_is_complete(gold):
+    c2c = gold["cust_to_company"]
+    assert len(c2c) == 120  # the global registry
+    assert all(cid.startswith("CUST-") for cid in c2c)
+    assert all(company for company in c2c.values())
+
+
+def test_gold_p2_is_the_29_members(gold, product):
+    members = gold["members"]
+    assert len(members) == 29
+    assert sorted(members) == sorted(product["customers"])
+    # the denominator the June scorecard got wrong: 29 resolutions out of 120 read 0.2417
+    assert round(29 / 120, 5) == 0.24167
+
+
+def test_gold_p1_is_37_slack_artifact_customer_pairs(gold, product):
+    mentions = gold["mentions"]
+    assert len(mentions) == 37
+    assert sum(len(v) for v in mentions.values()) == 37
+    slack_ids = {m["id"] for m in product["slack"]}
+    assert set(mentions) <= slack_ids
+    # no other artifact type names a customer id, in any field of the raw product JSON
+    for section in ("documents", "meeting_transcripts", "meeting_chats", "urls", "prs"):
+        assert re.findall(r"CUST-\d{4}", json.dumps(product[section])) == [], section
+
+
+def test_every_gold_company_is_reachable_through_a_member(gold, product):
+    member_companies = {c.lower() for c in gold["members"].values()}
+    for q in herb.company_questions(product):
+        assert {g.lower() for g in q["gold"]} <= member_companies, q["question"]
+
+
+def test_company_questions_split_5_and_2(product):
+    kinds = [q["kind"] for q in herb.company_questions(product)]
+    assert kinds.count("issue") == 5 and kinds.count("aggregation") == 2
+
+
+def test_questions_have_affected_customers(gold):
+    assert len(gold["q_to_custs"]) == 7
+    assert all(custs for custs in gold["q_to_custs"].values())
+
+
+def test_the_200_char_cut_would_have_lost_most_ids(product):
+    """Why the harness reads --json: in the indexed text, 30 of the 37 messages that name a
+    customer put the first id at or beyond char 200, where `nx search -c` cuts."""
+    offs = [m.start() for r in flatten_artifacts(product) if (m := re.search(r"CUST-\d{4}", r.text))]
+    assert len(offs) == 37
+    assert sum(1 for o in offs if o >= 200) == 30
+
+
+# --- the corpus is the one the baselines were measured on ---
+
+
+def test_corpus_is_indexed_through_the_catalog_path():
+    """A document per artifact, not a bare T3 write: titles resolve to catalog documents."""
+    hits = herb.search_hits("customer company contact", 1, where="title=CUST-0089")
+    assert len(hits) == 1 and hits[0]["title"] == "CUST-0089"
+    assert hits[0].get("catalog_doc_id"), "no catalog document: the corpus was written around the note path"
 
 
 # --- P1: entity-linker (RED until Step 2 ships + re-index) ---
@@ -59,37 +115,80 @@ def test_gold_questions_have_affected_customers(gold):
 
 @pytest.mark.xfail(reason="RDR-147 Step 2 entity-linker not implemented", strict=True)
 def test_p1_mentions_link_recall_is_total(gold):
-    cust_to_company, _ = gold
-    recall, _ = herb.score_p1_link_recall_precision(cust_to_company)
-    assert recall == 1.0  # every gold CUST has >=1 inbound 'mentions' edge
+    recall, _ = herb.score_p1_link_recall_precision(gold["mentions"])
+    assert recall == 1.0  # every gold artifact--mentions-->customer pair has an edge
 
 
-# --- P2: resolve operator (can run TODAY against where=title; should be ~green) ---
+# --- P2: exact title lookup over the 29 members (GREEN today) ---
 
 
 def test_p2_resolution_accuracy_is_total(gold):
-    cust_to_company, _ = gold
-    acc = herb.score_p2_resolution_accuracy(cust_to_company)
-    # Exact-key resolution is deterministic; demand perfection. If this is < 1.0
-    # the where=title primitive or the record-shape assumption regressed.
+    acc = herb.score_p2_resolution_accuracy(gold["members"])
     assert acc == 1.0
 
 
-# --- P3: hop-1 precision (RED until operator_filter is in the template, Step 4) ---
+# --- P3: hop-1 precision (RED until a precision step exists) ---
 
 
-@pytest.mark.xfail(reason="RDR-147 Step 4 operator_filter not in plan template", strict=True)
+@pytest.mark.xfail(reason="RDR-147 P3 bar 0.80 not met by plain hop-1 retrieval", strict=True)
 def test_p3_hop1_precision_meets_threshold(gold):
-    _, q_to_custs = gold
-    prec = herb.score_p3_hop1_precision(q_to_custs)
-    assert prec >= 0.80
+    assert herb.score_p3_hop1_precision(gold["q_to_custs"]) >= 0.80
 
 
-# --- E2E: the MVV bar (RED until P1+P2+P3 all land) ---
+# --- E2E: the script baseline is reproducible and equals the recorded one ---
 
 
-@pytest.mark.xfail(reason="RDR-147 end-to-end recall stays 0 until all phases land", strict=True)
-def test_e2e_company_recall_beats_baseline():
-    recall = herb.score_e2e_company_recall()
-    # The MVV bar: the headline metric the Problem Statement declared broken must move.
-    assert recall > herb._E2E_BASELINE
+def test_script_baseline_equals_the_recorded_one(product, recorded):
+    rows = herb.run_script_rows(herb.company_questions(product), k=recorded["k"])
+    want = recorded["baselines"]["script_fixed"]["rows"]
+    assert len(rows) == len(want) == 7
+    for got, rec in zip(rows, want, strict=True):
+        assert got["question"] == rec["question"]
+        assert got["pred"] == rec["pred"]
+        assert (got["recall"], got["precision"]) == (rec["recall"], rec["precision"])
+    assert herb.summarize(rows) == recorded["baselines"]["script_fixed"]["summary"]
+
+
+def test_script_baseline_is_not_vacuous(recorded):
+    """A dead sandbox must not read as recall 0: hop 1 returned hits for every question."""
+    rows = recorded["baselines"]["script_fixed"]["rows"]
+    assert [r["n_hits"] for r in rows] == [20] * 7
+
+
+def test_recorded_baselines_name_their_versions(recorded):
+    m = recorded["manifest"]
+    assert m["sandbox"] is True
+    assert m["nx_version"].startswith("nx, version ")
+    assert re.fullmatch(r"\d+\.\d+\.\d+", m["engine_release_version"])
+    assert m["embedding_model"] == "bge-base-en-v15-768"
+
+
+def test_p3_precision_is_high_on_the_issue_lookups_and_zero_on_the_aggregations(recorded):
+    """The overall P3 mean (below the 0.80 bar) comes from the two aggregation questions, which
+    surface at most one customer id; on the 5 issue lookups hop-1 precision is above the bar."""
+    by = recorded["p3"]["by_kind"]
+    assert by["agg2"]["mean_precision"] == 0.0
+    assert by["issue5"]["mean_precision"] >= 0.80
+    assert herb.p3_by_kind(recorded["p3"]["rows"]) == by
+
+
+def test_oracle_ceiling_is_recorded_and_total(recorded):
+    s = recorded["baselines"]["oracle_cited_artifacts"]["summary"]
+    assert s["all7"]["recall"] == 1.0
+
+
+# --- E2E product rung: nx_answer must reach the script's F1 (the MVV bar) ---
+
+
+def test_nx_answer_baseline_run_was_complete_and_within_the_cap(recorded):
+    run = recorded["baselines"]["nx_answer"]["run"]
+    assert run["complete"] is True
+    assert run["runs_with_unknown_cost"] == 0
+    assert run["total_cost_usd"] <= 2.0
+
+
+@pytest.mark.xfail(reason="RDR-147 MVV: nx_answer declines these questions today (non-answer: uncovered)", strict=True)
+def test_nx_answer_company_f1_reaches_the_script_baseline(recorded):
+    nxa = recorded["baselines"]["nx_answer"]["summary"]["issue5"]["f1"]
+    script = recorded["baselines"]["script_fixed"]["summary"]["issue5"]["f1"]
+    assert nxa >= script

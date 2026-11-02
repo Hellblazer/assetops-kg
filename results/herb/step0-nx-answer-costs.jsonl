@@ -1,0 +1,22 @@
+{"ts": "2026-11-02T18:52:12.923430+00:00", "run": "run1-no-evidence-capture", "cost_usd": 0.0035441, "question": "Find the names of companies were affected by issues in the AI Model & Search Algorithm in "}
+{"ts": "2026-11-02T18:52:12.923430+00:00", "run": "run1-no-evidence-capture", "cost_usd": 0.00198285, "question": "Find the names of companies were affected by issues in the backend search engine of Search"}
+{"ts": "2026-11-02T18:52:12.923430+00:00", "run": "run1-no-evidence-capture", "cost_usd": 0.0019233500000000003, "question": "Find the names of companies were affected by issues in the SearchFlow user interface that "}
+{"ts": "2026-11-02T18:52:12.923430+00:00", "run": "run1-no-evidence-capture", "cost_usd": 0.07138296, "question": "Find the names of companies were affected by issues in the Search API of SearchFlow that p"}
+{"ts": "2026-11-02T18:52:12.923430+00:00", "run": "run1-no-evidence-capture", "cost_usd": 0.05008026, "question": "Find the names of companies were affected by issues in the database management of SearchFl"}
+{"ts": "2026-11-02T18:52:12.923430+00:00", "run": "run1-no-evidence-capture", "cost_usd": 0.05080747, "question": "Find the name of company that has the maximum number of resolved bugs in SearchFlow"}
+{"ts": "2026-11-02T18:52:12.923430+00:00", "run": "run1-no-evidence-capture", "cost_usd": 0.04984346, "question": "Find the name of company that has the maximum number of unresolved bugs in SearchFlow?"}
+{"ts": "2026-11-02T18:53:06Z", "run": "probe-envelope-shape (1 call, not scored)", "cost_usd": 0.013004819999999999, "question": "Search API security risks"}
+{"ts": "2026-11-02T18:55:43.596396+00:00", "run": "run2-with-evidence", "cost_usd": 0.05101936, "question": "Find the names of companies were affected by issues in the AI Model & Search Algorithm in "}
+{"ts": "2026-11-02T18:56:19.957039+00:00", "run": "run2-with-evidence", "cost_usd": 0.05204267, "question": "Find the names of companies were affected by issues in the backend search engine of Search"}
+{"ts": "2026-11-02T18:56:48.542698+00:00", "run": "run2-with-evidence", "cost_usd": 0.04952136000000001, "question": "Find the names of companies were affected by issues in the SearchFlow user interface that "}
+{"ts": "2026-11-02T18:57:18.372245+00:00", "run": "run2-with-evidence", "cost_usd": 0.04928435, "question": "Find the names of companies were affected by issues in the Search API of SearchFlow that p"}
+{"ts": "2026-11-02T18:57:45.848504+00:00", "run": "run2-with-evidence", "cost_usd": 0.05027786, "question": "Find the names of companies were affected by issues in the database management of SearchFl"}
+{"ts": "2026-11-02T18:58:13.821729+00:00", "run": "run2-with-evidence", "cost_usd": 0.051148479999999996, "question": "Find the name of company that has the maximum number of resolved bugs in SearchFlow"}
+{"ts": "2026-11-02T18:58:34.957291+00:00", "run": "run2-with-evidence", "cost_usd": 0.052153069999999996, "question": "Find the name of company that has the maximum number of unresolved bugs in SearchFlow?"}
+{"ts": "2026-11-02T19:05:34.092941+00:00", "run": "run3-final", "cost_usd": 0.00177487, "question": "Find the names of companies were affected by issues in the AI Model & Search Algorithm in "}
+{"ts": "2026-11-02T19:05:48.187243+00:00", "run": "run3-final", "cost_usd": 0.00145553, "question": "Find the names of companies were affected by issues in the backend search engine of Search"}
+{"ts": "2026-11-02T19:06:03.740783+00:00", "run": "run3-final", "cost_usd": 0.00160769, "question": "Find the names of companies were affected by issues in the SearchFlow user interface that "}
+{"ts": "2026-11-02T19:06:26.150186+00:00", "run": "run3-final", "cost_usd": 0.01319612, "question": "Find the names of companies were affected by issues in the Search API of SearchFlow that p"}
+{"ts": "2026-11-02T19:06:49.339026+00:00", "run": "run3-final", "cost_usd": 0.01305013, "question": "Find the names of companies were affected by issues in the database management of SearchFl"}
+{"ts": "2026-11-02T19:07:12.827001+00:00", "run": "run3-final", "cost_usd": 0.015037519999999999, "question": "Find the name of company that has the maximum number of resolved bugs in SearchFlow"}
+{"ts": "2026-11-02T19:07:35.346981+00:00", "run": "run3-final", "cost_usd": 0.01653974, "question": "Find the name of company that has the maximum number of unresolved bugs in SearchFlow?"}
