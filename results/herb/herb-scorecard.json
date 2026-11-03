@@ -1,0 +1,90 @@
+{
+  "rdr": "RDR-147",
+  "step": "0",
+  "baseline_e2e_company_recall_june": 0.0,
+  "k": 20,
+  "manifest": {
+    "timestamp_utc": "2026-11-02T19:07:35.347539+00:00",
+    "nx_version": "nx, version 7.94.0",
+    "engine_release_version": "0.1.175",
+    "engine_app_version": "1.0-SNAPSHOT",
+    "embedding_mode": "onnx-local",
+    "embedding_model": "bge-base-en-v15-768",
+    "service_endpoint": "127.0.0.1:53370",
+    "product": "SearchFlow",
+    "collection": "knowledge__herb-searchflow",
+    "sandbox": true
+  },
+  "rungs": [
+    {
+      "phase": "P1",
+      "metric": "mentions_link_recall",
+      "value": null,
+      "target": "==1.0",
+      "status": "RED"
+    },
+    {
+      "phase": "P1",
+      "metric": "mentions_link_precision",
+      "value": null,
+      "target": ">=0.95",
+      "status": "RED"
+    },
+    {
+      "phase": "P2",
+      "metric": "resolution_accuracy_29_members",
+      "value": 1.0,
+      "target": "==1.0",
+      "status": "GREEN"
+    },
+    {
+      "phase": "P3",
+      "metric": "hop1_precision",
+      "value": 0.6904761904761905,
+      "target": ">=0.80",
+      "status": "RED"
+    },
+    {
+      "phase": "E2E-script",
+      "metric": "company_recall_all7",
+      "value": 0.4761904761904762,
+      "target": "baseline",
+      "status": "BASELINE"
+    },
+    {
+      "phase": "E2E-script",
+      "metric": "company_precision_all7",
+      "value": 0.6904761904761905,
+      "target": "baseline",
+      "status": "BASELINE"
+    },
+    {
+      "phase": "E2E-script",
+      "metric": "company_f1_issue5",
+      "value": 0.7642857142857142,
+      "target": "baseline",
+      "status": "BASELINE"
+    },
+    {
+      "phase": "E2E-nx_answer",
+      "metric": "company_recall_all7",
+      "value": 0.0,
+      "target": "report",
+      "status": "BASELINE"
+    },
+    {
+      "phase": "E2E-nx_answer",
+      "metric": "company_precision_all7",
+      "value": 0.0,
+      "target": "report",
+      "status": "BASELINE"
+    },
+    {
+      "phase": "E2E-nx_answer",
+      "metric": "company_f1_issue5",
+      "value": 0.0,
+      "target": ">=script F1 (issue5)",
+      "status": "RED"
+    }
+  ]
+}

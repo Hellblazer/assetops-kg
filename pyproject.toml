@@ -29,6 +29,10 @@ build-backend = "setuptools.build_meta"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "herb: RDR-147 HERB benchmark-ladder oracle tests (needs ~/git/HERB; corpus-dependent rungs need the knowledge__herb-searchflow index). Excluded from default CI; run at phase-review gates in the sandbox.",
+    "integration: tests that hit real I/O (HERB source, nexus retrieval); excluded from the default unit run.",
+]
 
 [tool.ruff]
 target-version = "py310"

@@ -20,7 +20,9 @@ Scope of THIS scaffold (SearchFlow smoke test):
     - retrieval-recall@k metric against gold citations
     - emit HERB-compatible output (``code/evaluate.py`` consumes this shape)
   IMPLEMENTED, needs a live nexus index:
-    - ``--mode index``: materialize artifacts into a T3 collection via `nx store put`
+    - ``--mode index``: materialize artifacts through the normal note path (the same
+      put_note + post-store hook chain `nx store put` runs, one process, so catalog
+      documents exist and hooks fire)
     - ``--mode eval`` retrieval arm: query `nx search --json`, map hits -> artifact ids
     - ``--answer-arm nx_answer``: the real composed answer arm — calls the
       ``nx_answer`` function out-of-process via the conexus interpreter
@@ -63,6 +65,8 @@ from typing import Any
 
 from rich.console import Console
 
+from benchmark.multihop_resolve import NxError, artifact_id_from_title, search_hits
+
 console = Console()
 logger = logging.getLogger(__name__)
 
@@ -70,18 +74,22 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_HERB_DIR = Path("~/git/HERB").expanduser()
+DEFAULT_HERB_DIR = Path(os.environ.get("HERB_DIR") or "~/git/HERB").expanduser()
 DEFAULT_PRODUCT = "SearchFlow"
 # nexus normalizes a bare name to ``knowledge__<name>``; one collection per product.
 COLLECTION_PREFIX = "herb"
 ARTIFACT_TYPES = ("slack", "documents", "meeting_transcripts", "urls", "prs")
 
 # nx_answer is MCP-only (no `nx answer` CLI), but it is a plain async function in
-# the conexus tool. We invoke it out-of-process via the conexus interpreter so the
-# project venv stays decoupled from the nexus install. Override with NX_PYTHON.
-CONEXUS_PYTHON = Path(
-    os.environ.get("NX_PYTHON", "~/.local/share/uv/tools/conexus/bin/python3")
-).expanduser()
+# the conexus tool. We invoke it out-of-process via the interpreter of the nx install so
+# the project venv stays decoupled from the nexus install. herb_sandbox.sh exports
+# NX_PYTHON; outside the sandbox the current tool generation's interpreter is used.
+def _default_nx_python() -> str:
+    gen = Path("~/.local/share/nexus/tools/current").expanduser()
+    return str(gen / "bin" / "python3")
+
+
+CONEXUS_PYTHON = Path(os.environ.get("NX_PYTHON") or _default_nx_python()).expanduser()
 # stdout sentinel so we can separate the JSON envelope from nexus's structlog noise.
 _NXA_SENTINEL = "__NXA_RESULT__"
 
@@ -239,68 +247,94 @@ def corpus_arg(product: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-# In-process batch indexer: one conexus-interpreter process loads the T3 client
-# (and embedder) ONCE, then loops db.put over every artifact. The per-artifact
-# `nx store put` CLI alternative pays nexus import + client init on every call —
-# measured ~30 min for SearchFlow vs ~25 s here (the model lives in the daemon;
-# the cost was process startup, not embedding). title=id so search hits map back.
+# In-process batch indexer. One interpreter loads nexus once and drives the `nx store put`
+# command object for every artifact, so each artifact goes through the normal note path:
+# put_note (split to the embedding window, catalog document registered, manifest written),
+# then the post-store hook chains, then the completion stamp. Nothing is written to T3
+# directly; the old driver called db.put, which registers no catalog document and fires no
+# hook. title=<artifact id> so search hits map back; a repeated id (HERB ships two NLTK url
+# records under one id) gets a '#dup<N>' title, which artifact_id_from_title strips.
 _BATCH_INDEX_DRIVER = textwrap.dedent(
     """
-    import json, sys
-    from nexus.commands.store import _t3
-    from nexus.corpus import t3_collection_name
+    import json, sys, tempfile, os
+    from click.testing import CliRunner
+    from nexus.commands.store import store
     arts = json.load(open(sys.argv[1])); coll = sys.argv[2]
-    db = _t3(); col = t3_collection_name(coll, t3=db)
-    ok = 0
-    for a in arts:
+    runner = CliRunner()
+    ok = 0; failed = []
+    for i, a in enumerate(arts, 1):
         if not a["text"].strip():
             continue
-        db.put(collection=col, content=a["text"], title=a["id"], tags=a["tags"])
-        ok += 1
-    print("{sentinel}" + json.dumps({{"indexed": ok, "collection": col}}))
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as tf:
+            tf.write(a["text"]); path = tf.name
+        try:
+            r = runner.invoke(store, ["put", path, "--collection", coll, "--title", a["title"],
+                                      "--tags", a["tags"]])
+        finally:
+            os.unlink(path)
+        if r.exit_code == 0 and "Stored:" in r.output:
+            ok += 1
+        else:
+            failed.append({{"title": a["title"], "exit": r.exit_code, "out": r.output[-300:]}})
+        if i % 100 == 0:
+            print("progress", i, len(arts), file=sys.stderr, flush=True)
+    print("{sentinel}" + json.dumps({{"indexed": ok, "failed": failed, "collection": coll}}))
     """
 ).format(sentinel=_NXA_SENTINEL)
 
 
-def index_corpus(records: list[ArtifactRecord], product: str, limit: int | None) -> int:
-    """Store each artifact in ``knowledge__herb-<product>`` with title=id.
+def unique_titles(records: list[ArtifactRecord]) -> list[tuple[ArtifactRecord, str]]:
+    """Pair each record with its catalog title: the id, or '<id>#dup<N>' from the second use on.
 
-    Batches the whole corpus through a single conexus-interpreter process so the
-    T3 client/embedder initializes once (see ``_BATCH_INDEX_DRIVER``).
-    """
+    Catalog identity for a note is (collection, title), so a repeated title would replace the
+    earlier document instead of adding one."""
+    seen: dict[str, int] = {}
+    out: list[tuple[ArtifactRecord, str]] = []
+    for r in records:
+        n = seen.get(r.id, 0) + 1
+        seen[r.id] = n
+        out.append((r, r.id if n == 1 else f"{r.id}#dup{n}"))
+    return out
+
+
+def index_corpus(records: list[ArtifactRecord], product: str, limit: int | None) -> int:
+    """Store each artifact in ``knowledge__herb-<product>`` with title=id through the note path.
+
+    Raises ``NxError`` if any artifact failed to store (a partial index must not be scored)."""
     import tempfile
 
     if not CONEXUS_PYTHON.exists():
-        console.print(f"[red]conexus interpreter not found at {CONEXUS_PYTHON}; set NX_PYTHON[/red]")
-        return 0
+        raise NxError(f"nx interpreter not found at {CONEXUS_PYTHON}; set NX_PYTHON")
     coll = collection_name(product)
     subset = records[:limit] if limit else records
     payload = [
-        {"id": r.id, "text": r.text, "tags": f"herb,{product},{r.source_type}"}
-        for r in subset if r.text.strip()
+        {"id": r.id, "title": title, "text": r.text, "tags": f"herb,{product},{r.source_type}"}
+        for r, title in unique_titles(subset) if r.text.strip()
     ]
-    console.print(f"Indexing {len(payload)} artifacts -> [cyan]knowledge__{coll}[/cyan] (in-process batch)…")
+    console.print(f"Indexing {len(payload)} artifacts -> [cyan]knowledge__{coll}[/cyan] (store note path, in-process)…")
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tf:
         json.dump(payload, tf)
         tmp = tf.name
     try:
         proc = subprocess.run(
             [str(CONEXUS_PYTHON), "-c", _BATCH_INDEX_DRIVER, tmp, coll],
-            capture_output=True, timeout=1800, check=True,
+            capture_output=True, timeout=3600, check=True,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         err = getattr(e, "stderr", b"") or b""
-        console.print(f"[red]batch index failed:[/red] {e}\n{err.decode()[-800:]}")
-        return 0
+        raise NxError(f"batch index failed: {e}\n{err.decode(errors='replace')[-800:]}") from e
     finally:
         os.unlink(tmp)
-    ok = 0
+    res = None
     for line in proc.stdout.decode().splitlines():
         if line.startswith(_NXA_SENTINEL):
             res = json.loads(line[len(_NXA_SENTINEL):])
-            ok = res["indexed"]
-            console.print(f"[green]Indexed {ok} artifacts[/green] -> {res['collection']}")
-    return ok
+    if res is None:
+        raise NxError("batch index printed no result line")
+    console.print(f"[green]Indexed {res['indexed']} / {len(payload)} artifacts[/green] -> {res['collection']}")
+    if res["failed"]:
+        raise NxError(f"{len(res['failed'])} artifacts failed to store, first: {res['failed'][0]}")
+    return res["indexed"]
 
 
 # ---------------------------------------------------------------------------
@@ -308,25 +342,14 @@ def index_corpus(records: list[ArtifactRecord], product: str, limit: int | None)
 # ---------------------------------------------------------------------------
 
 
-def _artifact_id_from_title(title: str) -> str:
-    """Strip nexus chunk suffixes (``id:chunk-N`` / ``id#section``) back to the id."""
-    return title.split(":")[0].split("#")[0].strip()
-
-
 def retrieve(question: str, product: str, k: int) -> list[str]:
-    """Return up to ``k`` artifact ids ranked by nexus retrieval, deduped in order."""
-    try:
-        proc = subprocess.run(
-            ["nx", "search", question, "--corpus", corpus_arg(product), "-m", str(k), "--json"],
-            capture_output=True, timeout=120, check=True,
-        )
-        hits = json.loads(proc.stdout.decode() or "[]")
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
-        logger.warning("search failed for %r: %s", question[:60], e)
-        return []
+    """Return up to ``k`` artifact ids ranked by nexus retrieval, deduped in order.
+
+    Raises ``NxError`` when the search fails; an empty list means the index answered with no hits."""
+    hits = search_hits(question, k, corpus=corpus_arg(product))
     seen: list[str] = []
     for h in hits:
-        aid = _artifact_id_from_title(h.get("title", ""))
+        aid = artifact_id_from_title(h.get("title", ""))
         if aid and aid not in seen:
             seen.append(aid)
     return seen
@@ -360,49 +383,69 @@ def question_metrics(retrieved: list[str], gold: list[str], cutoffs: tuple[int, 
 # Answer arm
 # ---------------------------------------------------------------------------
 
-# Inline script run by the conexus interpreter: call nx_answer(structured=True)
+# Inline script run by the nx interpreter: call nx_answer(structured=True)
 # and print the envelope as one sentinel-prefixed JSON line on stdout. nexus's
 # own structlog output goes to stderr and is discarded.
 _NXA_DRIVER = textwrap.dedent(
     """
     import asyncio, json, sys
-    from nexus.mcp.core import nx_answer
+    from nexus.mcp.core import nx_answer, store_get_many
     async def go():
-        r = await nx_answer(question=sys.argv[1], scope=sys.argv[2],
-                            structured=True, max_steps=int(sys.argv[3]))
+        r = await nx_answer(question=sys.argv[1], scope=sys.argv[2], structured=True,
+                            max_steps=int(sys.argv[3]), budget_usd=float(sys.argv[4]))
         if isinstance(r, dict):
-            out = {{"final_text": r.get("final_text"), "chunks": r.get("chunks") or [],
-                    "plan_id": r.get("plan_id"), "step_count": r.get("step_count")}}
+            chunks = r.get("chunks") or []
+            # Hydrate the evidence nx_answer retrieved, so the harness can say what the
+            # reducer had in hand when it declined or answered.
+            ev = []
+            if chunks:
+                got = store_get_many(ids=[c["chash"] for c in chunks],
+                                     collections=[c["collection"] for c in chunks],
+                                     max_chars_per_doc=20000, structured=True)
+                ev = got.get("contents") or [] if isinstance(got, dict) else []
+            out = {{"final_text": r.get("final_text"), "chunks": chunks, "evidence_texts": ev,
+                    "plan_id": r.get("plan_id"), "step_count": r.get("step_count"),
+                    "cost_usd": r.get("cost_usd"), "duration_ms": r.get("duration_ms"),
+                    "coverage_reason": (r.get("coverage") or {{}}).get("reason"),
+                    "coverage_state": (r.get("coverage") or {{}}).get("state")}}
         else:
-            out = {{"final_text": r, "chunks": [], "plan_id": None, "step_count": None}}
+            out = {{"final_text": r, "chunks": [], "evidence_texts": [], "plan_id": None,
+                    "step_count": None, "cost_usd": None, "duration_ms": None}}
         print("{sentinel}" + json.dumps(out))
     asyncio.run(go())
     """
 ).format(sentinel=_NXA_SENTINEL)
 
+DEFAULT_NX_ANSWER_BUDGET_USD = 0.5
 
-def nx_answer_call(question: str, scope: str, max_steps: int, timeout: int) -> dict[str, Any] | None:
-    """Invoke nx_answer out-of-process; return the structured envelope or None.
 
-    NB latency: nx_answer spawns claude -p per operator step. Observed
-    distribution skews to 30s-4min per call (one 6-step plan measured 244s).
-    Budget accordingly — this is the expensive arm.
+def nx_answer_call(question: str, scope: str, max_steps: int, timeout: int,
+                   budget_usd: float = DEFAULT_NX_ANSWER_BUDGET_USD) -> dict[str, Any]:
+    """Invoke nx_answer out-of-process; return the structured envelope.
+
+    Raises ``NxError`` when the call fails, times out, or prints no envelope (the old
+    harness returned None and the failure scored as a zero). ``cost_usd`` in the envelope is
+    the run's recorded spend; ``budget_usd`` is nx_answer's SOFT per-call guidance, so the
+    caller still sums ``cost_usd`` against its own hard cap.
+
+    NB latency: nx_answer spawns claude -p per operator step; 30s-4min per call.
     """
     if not CONEXUS_PYTHON.exists():
-        logger.warning("conexus interpreter not found at %s; set NX_PYTHON", CONEXUS_PYTHON)
-        return None
+        raise NxError(f"nx interpreter not found at {CONEXUS_PYTHON}; set NX_PYTHON")
     try:
         proc = subprocess.run(
-            [str(CONEXUS_PYTHON), "-c", _NXA_DRIVER, question, scope, str(max_steps)],
+            [str(CONEXUS_PYTHON), "-c", _NXA_DRIVER, question, scope, str(max_steps), str(budget_usd)],
             capture_output=True, timeout=timeout, check=True,
         )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-        logger.warning("nx_answer failed for %r: %s", question[:60], e)
-        return None
+    except subprocess.CalledProcessError as e:
+        raise NxError(f"nx_answer failed for {question[:60]!r}: exit {e.returncode}: "
+                      f"{(e.stderr or b'').decode(errors='replace')[-600:]}") from e
+    except subprocess.TimeoutExpired as e:
+        raise NxError(f"nx_answer timed out after {timeout}s for {question[:60]!r}") from e
     for line in proc.stdout.decode().splitlines():
         if line.startswith(_NXA_SENTINEL):
             return json.loads(line[len(_NXA_SENTINEL):])
-    return None
+    raise NxError(f"nx_answer printed no envelope for {question[:60]!r}")
 
 
 def answer_question(question: str, product: str, arm: str, max_steps: int, timeout: int,
@@ -416,8 +459,7 @@ def answer_question(question: str, product: str, arm: str, max_steps: int, timeo
     be near-zero because there is no real answer synthesis.
     """
     if arm == "nx_answer":
-        env = nx_answer_call(question, corpus_arg(product), max_steps, timeout)
-        return env.get("final_text") if env else None
+        return nx_answer_call(question, corpus_arg(product), max_steps, timeout).get("final_text")
     return " ".join(retrieved) if retrieved else None
 
 
@@ -433,26 +475,43 @@ def _sh(cmd: list[str]) -> str:
         return ""
 
 
+def service_versions() -> dict[str, str]:
+    """Versions of the nx client and the engine service it talks to, read from
+    ``nx --version`` and ``nx daemon service status``. Raises ``NxError`` when a field is
+    missing: a result must never be recorded without the versions that produced it."""
+    nx_version = _sh(["nx", "--version"])
+    status = _sh(["nx", "daemon", "service", "status"])
+    fields: dict[str, str] = {}
+    for line in status.splitlines():
+        key, _, val = line.strip().partition(":")
+        fields[key.strip()] = val.strip()
+    out = {
+        "nx_version": nx_version,
+        "engine_release_version": fields.get("service_release_version", ""),
+        "engine_app_version": fields.get("service_app_version", ""),
+        "embedding_mode": fields.get("embedding_mode", ""),
+        "embedding_model": fields.get("embedding_models", ""),
+        "service_endpoint": f"{fields.get('host', '')}:{fields.get('port', '')}",
+    }
+    missing = [k for k, v in out.items() if not v or v == ":"]
+    if missing:
+        raise NxError(f"cannot record versions, missing {missing} (is the sandbox service up? status was {status[:300]!r})")
+    return out
+
+
 def build_manifest(product: str, depth: int, arm: str, n_questions: int, n_artifacts: int,
                    herb_dir: Path) -> dict[str, Any]:
     """Capture everything needed to reproduce and interpret a run.
 
     Versioned alongside the results so a number is never orphaned from the
-    config that produced it: tool/model/backend identity, both repo SHAs,
-    the embedding model, and the isolation context.
+    config that produced it: nx and engine versions, both repo SHAs, the embedding
+    model, and the isolation context.
     """
-    embed_model = ""
-    for line in _sh(["nx", "doctor"]).splitlines():
-        if "Embedding model:" in line:
-            embed_model = line.split("Embedding model:")[-1].strip()
-            break
     return {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-        "nx_version": _sh(["nx", "--version"]),
-        "embedding_model": embed_model,
-        "chroma_backend": "local" if os.environ.get("NX_LOCAL") == "1" else "cloud",
+        **service_versions(),
+        "sandbox": os.environ.get("HERB_SANDBOX") == "1",
         "nexus_config_dir": os.environ.get("NEXUS_CONFIG_DIR", "<default>"),
-        "local_chroma_path": os.environ.get("NX_LOCAL_CHROMA_PATH", "<default>"),
         "assetops_sha": _sh(["git", "rev-parse", "--short", "HEAD"]),
         "herb_sha": _sh(["git", "-C", str(herb_dir), "rev-parse", "--short", "HEAD"]),
         "product": product,

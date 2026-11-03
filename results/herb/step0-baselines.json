@@ -1,0 +1,1172 @@
+{
+  "manifest": {
+    "timestamp_utc": "2026-11-02T19:07:35.347539+00:00",
+    "nx_version": "nx, version 7.94.0",
+    "engine_release_version": "0.1.175",
+    "engine_app_version": "1.0-SNAPSHOT",
+    "embedding_mode": "onnx-local",
+    "embedding_model": "bge-base-en-v15-768",
+    "service_endpoint": "127.0.0.1:53370",
+    "product": "SearchFlow",
+    "collection": "knowledge__herb-searchflow",
+    "sandbox": true
+  },
+  "k": 20,
+  "comparison_predicted_vs_measured": [
+    {
+      "metric": "script_fixed.recall.all7",
+      "predicted": 0.4,
+      "op": "==",
+      "measured": 0.4761904761904762
+    },
+    {
+      "metric": "script_fixed.recall.issue5",
+      "predicted": 0.52,
+      "op": "==",
+      "measured": 0.6666666666666667
+    },
+    {
+      "metric": "script_fixed.recall.agg2",
+      "predicted": 0.1,
+      "op": "==",
+      "measured": 0.0
+    },
+    {
+      "metric": "p3_hop1_precision",
+      "predicted": 0.55,
+      "op": "==",
+      "measured": 0.6904761904761905
+    },
+    {
+      "metric": "p2_resolution_accuracy_29",
+      "predicted": 1.0,
+      "op": "==",
+      "measured": 1.0
+    },
+    {
+      "metric": "nx_answer.recall.all7",
+      "predicted": 0.1,
+      "op": "==",
+      "measured": 0.0
+    },
+    {
+      "metric": "nx_answer.precision.all7",
+      "predicted": 0.3,
+      "op": "<",
+      "measured": 0.0
+    },
+    {
+      "metric": "oracle_cited.recall.issue5",
+      "predicted": 1.0,
+      "op": "==",
+      "measured": 1.0
+    },
+    {
+      "metric": "oracle_cited.precision.issue5",
+      "predicted": 0.61,
+      "op": "==",
+      "measured": 0.6154761904761905
+    },
+    {
+      "metric": "oracle_cited.precision.agg2",
+      "predicted": 0.1,
+      "op": "==",
+      "measured": 0.1
+    }
+  ],
+  "baselines": {
+    "script_fixed": {
+      "summary": {
+        "all7": {
+          "n": 7,
+          "recall": 0.4761904761904762,
+          "precision": 0.6904761904761905,
+          "f1": 0.5459183673469388
+        },
+        "issue5": {
+          "n": 5,
+          "recall": 0.6666666666666667,
+          "precision": 0.9666666666666666,
+          "f1": 0.7642857142857142
+        },
+        "agg2": {
+          "n": 2,
+          "recall": 0.0,
+          "precision": 0.0,
+          "f1": 0.0
+        }
+      },
+      "rows": [
+        {
+          "question": "Find the names of companies were affected by issues in the AI Model & Search Algorithm in SearchFlow that caused decreased search accuracy and disrupted workflow?",
+          "kind": "issue",
+          "gold": [
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech",
+            "NextGenTech",
+            "SmartData",
+            "TechCorp"
+          ],
+          "pred": [
+            "CloudSync",
+            "DataSolutions",
+            "FusionTech",
+            "NextGenTech",
+            "SmartData",
+            "TechCorp"
+          ],
+          "recall": 0.8333333333333334,
+          "precision": 0.8333333333333334,
+          "f1": 0.8333333333333334,
+          "hit": 5,
+          "n_pred": 6,
+          "n_gold": 6,
+          "n_hits": 20,
+          "cust_ids": [
+            "CUST-0018",
+            "CUST-0055",
+            "CUST-0075",
+            "CUST-0080",
+            "CUST-0092",
+            "CUST-0096"
+          ]
+        },
+        {
+          "question": "Find the names of companies were affected by issues in the backend search engine of SearchFlow that prevented retrieval of important historical messages, risking loss of critical information and user dissatisfaction?",
+          "kind": "issue",
+          "gold": [
+            "CloudSync",
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech",
+            "InnovateAI"
+          ],
+          "pred": [
+            "DataSolutions",
+            "FusionTech"
+          ],
+          "recall": 0.4,
+          "precision": 1.0,
+          "f1": 0.5714285714285715,
+          "hit": 2,
+          "n_pred": 2,
+          "n_gold": 5,
+          "n_hits": 20,
+          "cust_ids": [
+            "CUST-0018",
+            "CUST-0049",
+            "CUST-0089",
+            "CUST-0107"
+          ]
+        },
+        {
+          "question": "Find the names of companies were affected by issues in the SearchFlow user interface that caused frustration due to unresponsive interactions during search result loading?",
+          "kind": "issue",
+          "gold": [
+            "AITransformers",
+            "BlueWave",
+            "FusionTech",
+            "SmartData",
+            "TechCorp"
+          ],
+          "pred": [
+            "BlueWave",
+            "FusionTech",
+            "SmartData"
+          ],
+          "recall": 0.6,
+          "precision": 1.0,
+          "f1": 0.7499999999999999,
+          "hit": 3,
+          "n_pred": 3,
+          "n_gold": 5,
+          "n_hits": 20,
+          "cust_ids": [
+            "CUST-0018",
+            "CUST-0101",
+            "CUST-0107",
+            "CUST-0117"
+          ]
+        },
+        {
+          "question": "Find the names of companies were affected by issues in the Search API of SearchFlow that posed security risks and potential data breaches?",
+          "kind": "issue",
+          "gold": [
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech"
+          ],
+          "pred": [
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech"
+          ],
+          "recall": 1.0,
+          "precision": 1.0,
+          "f1": 1.0,
+          "hit": 3,
+          "n_pred": 3,
+          "n_gold": 3,
+          "n_hits": 20,
+          "cust_ids": [
+            "CUST-0018",
+            "CUST-0049",
+            "CUST-0079",
+            "CUST-0089",
+            "CUST-0107",
+            "CUST-0115"
+          ]
+        },
+        {
+          "question": "Find the names of companies were affected by issues in the database management of SearchFlow that caused slow search performance and impacted productivity?",
+          "kind": "issue",
+          "gold": [
+            "CloudSync",
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech"
+          ],
+          "pred": [
+            "ComputeWorks",
+            "FusionTech"
+          ],
+          "recall": 0.5,
+          "precision": 1.0,
+          "f1": 0.6666666666666666,
+          "hit": 2,
+          "n_pred": 2,
+          "n_gold": 4,
+          "n_hits": 20,
+          "cust_ids": [
+            "CUST-0018",
+            "CUST-0036",
+            "CUST-0107",
+            "CUST-0115"
+          ]
+        },
+        {
+          "question": "Find the name of company that has the maximum number of resolved bugs in SearchFlow",
+          "kind": "aggregation",
+          "gold": [
+            "FusionTech"
+          ],
+          "pred": [
+            "ComputeWorks"
+          ],
+          "recall": 0.0,
+          "precision": 0.0,
+          "f1": 0.0,
+          "hit": 0,
+          "n_pred": 1,
+          "n_gold": 1,
+          "n_hits": 20,
+          "cust_ids": [
+            "CUST-0115"
+          ]
+        },
+        {
+          "question": "Find the name of company that has the maximum number of unresolved bugs in SearchFlow?",
+          "kind": "aggregation",
+          "gold": [
+            "FusionTech"
+          ],
+          "pred": [],
+          "recall": 0.0,
+          "precision": 0.0,
+          "f1": 0.0,
+          "hit": 0,
+          "n_pred": 0,
+          "n_gold": 1,
+          "n_hits": 20,
+          "cust_ids": []
+        }
+      ]
+    },
+    "nx_answer": {
+      "summary": {
+        "all7": {
+          "n": 7,
+          "recall": 0.0,
+          "precision": 0.0,
+          "f1": 0.0
+        },
+        "issue5": {
+          "n": 5,
+          "recall": 0.0,
+          "precision": 0.0,
+          "f1": 0.0
+        },
+        "agg2": {
+          "n": 2,
+          "recall": 0.0,
+          "precision": 0.0,
+          "f1": 0.0
+        }
+      },
+      "run": {
+        "total_cost_usd": 0.062662,
+        "cap_usd": 1.0,
+        "runs_with_unknown_cost": 0,
+        "complete": true
+      },
+      "rows": [
+        {
+          "question": "Find the names of companies were affected by issues in the AI Model & Search Algorithm in SearchFlow that caused decreased search accuracy and disrupted workflow?",
+          "kind": "issue",
+          "gold": [
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech",
+            "NextGenTech",
+            "SmartData",
+            "TechCorp"
+          ],
+          "pred": [],
+          "recall": 0.0,
+          "precision": 0.0,
+          "f1": 0.0,
+          "hit": 0,
+          "n_pred": 0,
+          "n_gold": 6,
+          "final_text": "[non-answer: uncovered] The plan (plan_id=9, 6 steps) retrieved evidence, but none of it covered a requested part of the question, so no answer is given.\nRetrieved 80 chunk(s); hydrate with store_get_many:\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:c059931da497894b5fa317e07b2716db2a670270c274a98fd7ea898c9b76cbcf\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:02dd1321f1d316e4af146675fc935ffe7cd3deff78b857b97c3887db4129282f\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:89407e96cff3f01e7889bcfd9239e1d4a01a974c39b8ceba69c59a4ebb9fb1f2\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:3fedf0114583452ca0c2c5da1cfc3f49011daba45161f2905cec012f9b6f3fed\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:1d341af118d564643b105107bc7d00a6c22ae38faeff58d7e985c731adf7d1d8\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:ebcb378cd49732746988bee1328e0082c41e09ab3e089a219b9d133e9dafd6bc\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:c5bc19b4e40281e95401a69891c844b676d6e520efd4fb7c73ea66417dd9400e\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:a4d9bf8be6d16a00c5c2ef593eba489049894081ae598afd4c49da8233cf9506\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:bc07bc9b4a801b94844eb275a0b306c081b5870ae08234f81d970336b56d1a20\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:21150e8c3e7c235152c65d5b9a962e061523271573e04acb9d80a037a1766d35\n  ... and 70 more (structured=True carries the full list)",
+          "plan_id": 9,
+          "step_count": 6,
+          "cost_usd": 0.00177487,
+          "coverage_state": "unavailable",
+          "coverage_reason": "uncovered",
+          "n_evidence_chunks": 80,
+          "evidence_cust_ids": [
+            "CUST-0018",
+            "CUST-0055",
+            "CUST-0075",
+            "CUST-0080",
+            "CUST-0086",
+            "CUST-0092",
+            "CUST-0096"
+          ],
+          "evidence_companies": [
+            "CloudSync",
+            "DataSolutions",
+            "FusionTech",
+            "InnovateAI",
+            "NextGenTech",
+            "SmartData",
+            "TechCorp"
+          ]
+        },
+        {
+          "question": "Find the names of companies were affected by issues in the backend search engine of SearchFlow that prevented retrieval of important historical messages, risking loss of critical information and user dissatisfaction?",
+          "kind": "issue",
+          "gold": [
+            "CloudSync",
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech",
+            "InnovateAI"
+          ],
+          "pred": [],
+          "recall": 0.0,
+          "precision": 0.0,
+          "f1": 0.0,
+          "hit": 0,
+          "n_pred": 0,
+          "n_gold": 5,
+          "final_text": "[non-answer: uncovered] The plan (plan_id=9, 6 steps) retrieved evidence, but none of it covered a requested part of the question, so no answer is given.\nRetrieved 80 chunk(s); hydrate with store_get_many:\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:66da6d2bec7547f6e89c2cde892810a6da84e5f6b352f164f9eb2ee7f6966b5a\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:ba8be721da1b7cdb14cec05fa05323f11fe1147594ddadb9e2350158acba306a\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:eb8d818ff35ea03318f23a2a790436ea842ee779b8e0ea79415c3f17af041b31\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:83c87d301e0b6f3be22ecc95b37732c12b35da13037acc49cfac7ec8a4a308a5\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:f86bb9fde25a28602ef3f37fa153586980035d5f31c7bbb462ee5736e831eca7\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:9b6f91e41983a11b8a523af88b595c57380eb39da5bb6279d967da938a794219\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:633e9d800ac40168b49546b1eb53590875e1e9828c16b86f9e24e1184f017a99\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:54575eeb97cfbfeb33ffb346d67af88b4257a75230ec65a1a798d94558cc6968\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:b154d5ffa9d68fcfc2e35f5e40947ab037440a691a3b198a668d5071c25b9da3\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:5ec19360366114307cf065b1d1fb7d6f0799e7725954cbdaff2e12f9afa67ded\n  ... and 70 more (structured=True carries the full list)",
+          "plan_id": 9,
+          "step_count": 6,
+          "cost_usd": 0.00145553,
+          "coverage_state": "unavailable",
+          "coverage_reason": "uncovered",
+          "n_evidence_chunks": 80,
+          "evidence_cust_ids": [
+            "CUST-0018",
+            "CUST-0049",
+            "CUST-0055",
+            "CUST-0075",
+            "CUST-0086",
+            "CUST-0089",
+            "CUST-0107",
+            "CUST-0115"
+          ],
+          "evidence_companies": [
+            "CloudSync",
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech",
+            "InnovateAI",
+            "SmartData"
+          ]
+        },
+        {
+          "question": "Find the names of companies were affected by issues in the SearchFlow user interface that caused frustration due to unresponsive interactions during search result loading?",
+          "kind": "issue",
+          "gold": [
+            "AITransformers",
+            "BlueWave",
+            "FusionTech",
+            "SmartData",
+            "TechCorp"
+          ],
+          "pred": [],
+          "recall": 0.0,
+          "precision": 0.0,
+          "f1": 0.0,
+          "hit": 0,
+          "n_pred": 0,
+          "n_gold": 5,
+          "final_text": "[non-answer: uncovered] The plan (plan_id=9, 6 steps) retrieved evidence, but none of it covered a requested part of the question, so no answer is given.\nRetrieved 80 chunk(s); hydrate with store_get_many:\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:07b138a3419fc49606554afbb2119ed0ff7bb11e6606844959feddd70c9ce7bf\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:ba8be721da1b7cdb14cec05fa05323f11fe1147594ddadb9e2350158acba306a\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:eb8d818ff35ea03318f23a2a790436ea842ee779b8e0ea79415c3f17af041b31\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:83c87d301e0b6f3be22ecc95b37732c12b35da13037acc49cfac7ec8a4a308a5\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:b154d5ffa9d68fcfc2e35f5e40947ab037440a691a3b198a668d5071c25b9da3\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:9b6f91e41983a11b8a523af88b595c57380eb39da5bb6279d967da938a794219\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:54575eeb97cfbfeb33ffb346d67af88b4257a75230ec65a1a798d94558cc6968\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:7f58474d1ebee3778d971a3f7bf35d17739a8d5da732b0de229495e5a613de1a\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:5ec19360366114307cf065b1d1fb7d6f0799e7725954cbdaff2e12f9afa67ded\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:7ef9318dc518844189d636d6c2e6d815de889157881a6c5cc3f3c737ed791511\n  ... and 70 more (structured=True carries the full list)",
+          "plan_id": 9,
+          "step_count": 6,
+          "cost_usd": 0.00160769,
+          "coverage_state": "unavailable",
+          "coverage_reason": "uncovered",
+          "n_evidence_chunks": 80,
+          "evidence_cust_ids": [
+            "CUST-0018",
+            "CUST-0029",
+            "CUST-0049",
+            "CUST-0055",
+            "CUST-0075",
+            "CUST-0092",
+            "CUST-0101",
+            "CUST-0107",
+            "CUST-0115",
+            "CUST-0117"
+          ],
+          "evidence_companies": [
+            "AITransformers",
+            "BlueWave",
+            "CloudSync",
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech",
+            "SmartData",
+            "TechCorp"
+          ]
+        },
+        {
+          "question": "Find the names of companies were affected by issues in the Search API of SearchFlow that posed security risks and potential data breaches?",
+          "kind": "issue",
+          "gold": [
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech"
+          ],
+          "pred": [],
+          "recall": 0.0,
+          "precision": 0.0,
+          "f1": 0.0,
+          "hit": 0,
+          "n_pred": 0,
+          "n_gold": 3,
+          "final_text": "[non-answer: uncovered] The plan (plan_id=0, 6 steps) retrieved evidence, but none of it covered a requested part of the question, so no answer is given.\nRetrieved 30 chunk(s); hydrate with store_get_many:\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:23c42106dfebd3e9bfcefc275c3cfc388c546fc183e2fbc5abdc155ce185d82f\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:296c152505018953d3f86ec687fefed4b3ff87a4748b04b0c950bf9215eafa2c\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:e737c559576c9ef3b2853daa3c0f0a740fcea657404a5be3499a8f59fe75239e\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:7f96e06c65174d4a11238766721dd6c7f2f26f2257403f5103d4fe2d7861074c\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:7c7fde3380a5a69c9a765fb080ab2f2f3a55046db1e0da06263cd20d451e9420\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:cb8e57fcec4de368b8f6bd8be9c69b38126d0f8cb59e4dec9fa02c25540cbf46\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:5ef0a3762be3b54931aace8c7498a0058fc106bb8448213ba149e3a868a48620\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:b6db2716d5fbb746b83b1f28814a01b9c45907dec9735674b8abe9a272a146e5\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:95dc39430bf9d0eb242c099efdfb84c465833b4bdc82cbb25f24c895e93ecd80\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:e84583801c22a342a68beecceaf1efd9001f9e265e81a084338c48ac235e4a73\n  ... and 20 more (structured=True carries the full list)",
+          "plan_id": 0,
+          "step_count": 6,
+          "cost_usd": 0.01319612,
+          "coverage_state": "unavailable",
+          "coverage_reason": "uncovered",
+          "n_evidence_chunks": 30,
+          "evidence_cust_ids": [
+            "CUST-0018",
+            "CUST-0049",
+            "CUST-0079",
+            "CUST-0089",
+            "CUST-0107",
+            "CUST-0115"
+          ],
+          "evidence_companies": [
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech"
+          ]
+        },
+        {
+          "question": "Find the names of companies were affected by issues in the database management of SearchFlow that caused slow search performance and impacted productivity?",
+          "kind": "issue",
+          "gold": [
+            "CloudSync",
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech"
+          ],
+          "pred": [],
+          "recall": 0.0,
+          "precision": 0.0,
+          "f1": 0.0,
+          "hit": 0,
+          "n_pred": 0,
+          "n_gold": 4,
+          "final_text": "[non-answer: uncovered] The plan (plan_id=0, 6 steps) retrieved evidence, but none of it covered a requested part of the question, so no answer is given.\nRetrieved 20 chunk(s); hydrate with store_get_many:\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:60ca028f4f9d0de06bc2b1496b0bbc9aaeb8be62561c2e4734f87c1cdc8bd577\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:e6994eb45c24e89ea84dcc550af2ecd107c0379b23aa0fe63ae6aa4b7e73d94c\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:87ebf8d8bebf3604cdf38adad5dde1467953438bd134ed2d38010f3911f10322\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:2c0c57dd5882d6cc8d33339b99fb6fc57fe49842472ff2a240c4e9c0ff676740\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:9d3a6597d262df2c613693ec300bc603eaf47dcdbd3ec4d4591ad688ef09d519\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:0a85bc7b5f9fef38cc0f4cecdc066c1753308f723ef1bef0316338649fabca13\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:348646f134fcac2344abf9282c71a65dbc07eab665656d8e6afd061ea298f8ad\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:9a7fc89c8d7ee2243d83e25eae12efbc99ec1eba9000fccbf76715b0bcf3c62a\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:99bb8fc7a2fd547aa4d3d251dd4ca58503661ae2279af131e299c5e4c076d1ba\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:e1ff3b7f549cc6c54480ee32ff63c96f2e36d2543a67c5f644af2ff9c0363ed8\n  ... and 10 more (structured=True carries the full list)",
+          "plan_id": 0,
+          "step_count": 6,
+          "cost_usd": 0.01305013,
+          "coverage_state": "unavailable",
+          "coverage_reason": "uncovered",
+          "n_evidence_chunks": 20,
+          "evidence_cust_ids": [
+            "CUST-0018",
+            "CUST-0036",
+            "CUST-0107",
+            "CUST-0115"
+          ],
+          "evidence_companies": [
+            "ComputeWorks",
+            "FusionTech"
+          ]
+        },
+        {
+          "question": "Find the name of company that has the maximum number of resolved bugs in SearchFlow",
+          "kind": "aggregation",
+          "gold": [
+            "FusionTech"
+          ],
+          "pred": [],
+          "recall": 0.0,
+          "precision": 0.0,
+          "f1": 0.0,
+          "hit": 0,
+          "n_pred": 0,
+          "n_gold": 1,
+          "final_text": "[non-answer: uncovered] The plan (plan_id=0, 6 steps) retrieved evidence, but none of it covered a requested part of the question, so no answer is given.\nRetrieved 60 chunk(s); hydrate with store_get_many:\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:ba8be721da1b7cdb14cec05fa05323f11fe1147594ddadb9e2350158acba306a\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:eb8d818ff35ea03318f23a2a790436ea842ee779b8e0ea79415c3f17af041b31\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:b154d5ffa9d68fcfc2e35f5e40947ab037440a691a3b198a668d5071c25b9da3\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:9b6f91e41983a11b8a523af88b595c57380eb39da5bb6279d967da938a794219\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:7ef9318dc518844189d636d6c2e6d815de889157881a6c5cc3f3c737ed791511\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:5ec19360366114307cf065b1d1fb7d6f0799e7725954cbdaff2e12f9afa67ded\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:83c87d301e0b6f3be22ecc95b37732c12b35da13037acc49cfac7ec8a4a308a5\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:54575eeb97cfbfeb33ffb346d67af88b4257a75230ec65a1a798d94558cc6968\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:9cbc9526887703b91138a91d76dcded85c5e9c21bd60af9770863b28e2aa5965\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:07b138a3419fc49606554afbb2119ed0ff7bb11e6606844959feddd70c9ce7bf\n  ... and 50 more (structured=True carries the full list)",
+          "plan_id": 0,
+          "step_count": 6,
+          "cost_usd": 0.015037519999999999,
+          "coverage_state": "unavailable",
+          "coverage_reason": "uncovered",
+          "n_evidence_chunks": 60,
+          "evidence_cust_ids": [
+            "CUST-0018",
+            "CUST-0107",
+            "CUST-0117"
+          ],
+          "evidence_companies": [
+            "BlueWave",
+            "FusionTech"
+          ]
+        },
+        {
+          "question": "Find the name of company that has the maximum number of unresolved bugs in SearchFlow?",
+          "kind": "aggregation",
+          "gold": [
+            "FusionTech"
+          ],
+          "pred": [],
+          "recall": 0.0,
+          "precision": 0.0,
+          "f1": 0.0,
+          "hit": 0,
+          "n_pred": 0,
+          "n_gold": 1,
+          "final_text": "[non-answer: uncovered] The plan (plan_id=0, 6 steps) retrieved evidence, but none of it covered a requested part of the question, so no answer is given.\nRetrieved 60 chunk(s); hydrate with store_get_many:\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:ba8be721da1b7cdb14cec05fa05323f11fe1147594ddadb9e2350158acba306a\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:eb8d818ff35ea03318f23a2a790436ea842ee779b8e0ea79415c3f17af041b31\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:61a68aeb476a8dd26939a771f32dd17c8fbc55cbb9c7ebab1c019861347b8f28\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:b154d5ffa9d68fcfc2e35f5e40947ab037440a691a3b198a668d5071c25b9da3\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:2a9bb05cebc58d827d1daf6f6a2e1a8d36a6dc433aa7c4d48adb2161d6eab021\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:9b6f91e41983a11b8a523af88b595c57380eb39da5bb6279d967da938a794219\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:83c87d301e0b6f3be22ecc95b37732c12b35da13037acc49cfac7ec8a4a308a5\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:5ec19360366114307cf065b1d1fb7d6f0799e7725954cbdaff2e12f9afa67ded\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:5fc4ba928773ea0ffa9abd26bb4be5f6fbe45e2b9d7d259cf707f3746d8846c8\n  knowledge__herb-searchflow__bge-base-en-v15-768__v1 chash:7ef9318dc518844189d636d6c2e6d815de889157881a6c5cc3f3c737ed791511\n  ... and 50 more (structured=True carries the full list)",
+          "plan_id": 0,
+          "step_count": 6,
+          "cost_usd": 0.01653974,
+          "coverage_state": "unavailable",
+          "coverage_reason": "uncovered",
+          "n_evidence_chunks": 60,
+          "evidence_cust_ids": [
+            "CUST-0018",
+            "CUST-0107"
+          ],
+          "evidence_companies": [
+            "FusionTech"
+          ]
+        }
+      ]
+    },
+    "oracle_cited_artifacts": {
+      "summary": {
+        "all7": {
+          "n": 7,
+          "recall": 1.0,
+          "precision": 0.4681972789115646,
+          "f1": 0.5943056943056942
+        },
+        "issue5": {
+          "n": 5,
+          "recall": 1.0,
+          "precision": 0.6154761904761905,
+          "f1": 0.7593006993006993
+        },
+        "agg2": {
+          "n": 2,
+          "recall": 1.0,
+          "precision": 0.1,
+          "f1": 0.18181818181818182
+        }
+      },
+      "rows": [
+        {
+          "question": "Find the names of companies were affected by issues in the AI Model & Search Algorithm in SearchFlow that caused decreased search accuracy and disrupted workflow?",
+          "kind": "issue",
+          "gold": [
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech",
+            "NextGenTech",
+            "SmartData",
+            "TechCorp"
+          ],
+          "pred": [
+            "AITransformers",
+            "BlueWave",
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech",
+            "InnovateAI",
+            "NextGenTech",
+            "SmartData",
+            "TechCorp"
+          ],
+          "recall": 1.0,
+          "precision": 0.6666666666666666,
+          "f1": 0.8,
+          "hit": 6,
+          "n_pred": 9,
+          "n_gold": 6,
+          "n_cited": 69,
+          "cust_ids": [
+            "CUST-0018",
+            "CUST-0029",
+            "CUST-0055",
+            "CUST-0080",
+            "CUST-0086",
+            "CUST-0089",
+            "CUST-0092",
+            "CUST-0096",
+            "CUST-0101",
+            "CUST-0107",
+            "CUST-0115",
+            "CUST-0117"
+          ]
+        },
+        {
+          "question": "Find the names of companies were affected by issues in the backend search engine of SearchFlow that prevented retrieval of important historical messages, risking loss of critical information and user dissatisfaction?",
+          "kind": "issue",
+          "gold": [
+            "CloudSync",
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech",
+            "InnovateAI"
+          ],
+          "pred": [
+            "CloudSync",
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech",
+            "InnovateAI",
+            "SmartData",
+            "TechCorp"
+          ],
+          "recall": 1.0,
+          "precision": 0.7142857142857143,
+          "f1": 0.8333333333333333,
+          "hit": 5,
+          "n_pred": 7,
+          "n_gold": 5,
+          "n_cited": 56,
+          "cust_ids": [
+            "CUST-0018",
+            "CUST-0075",
+            "CUST-0079",
+            "CUST-0086",
+            "CUST-0089",
+            "CUST-0092",
+            "CUST-0096",
+            "CUST-0101",
+            "CUST-0107",
+            "CUST-0115"
+          ]
+        },
+        {
+          "question": "Find the names of companies were affected by issues in the SearchFlow user interface that caused frustration due to unresponsive interactions during search result loading?",
+          "kind": "issue",
+          "gold": [
+            "AITransformers",
+            "BlueWave",
+            "FusionTech",
+            "SmartData",
+            "TechCorp"
+          ],
+          "pred": [
+            "AITransformers",
+            "BlueWave",
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech",
+            "NextGenTech",
+            "SmartData",
+            "TechCorp"
+          ],
+          "recall": 1.0,
+          "precision": 0.625,
+          "f1": 0.7692307692307693,
+          "hit": 5,
+          "n_pred": 8,
+          "n_gold": 5,
+          "n_cited": 60,
+          "cust_ids": [
+            "CUST-0018",
+            "CUST-0029",
+            "CUST-0049",
+            "CUST-0080",
+            "CUST-0089",
+            "CUST-0092",
+            "CUST-0096",
+            "CUST-0101",
+            "CUST-0115",
+            "CUST-0117"
+          ]
+        },
+        {
+          "question": "Find the names of companies were affected by issues in the Search API of SearchFlow that posed security risks and potential data breaches?",
+          "kind": "issue",
+          "gold": [
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech"
+          ],
+          "pred": [
+            "CloudSync",
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech",
+            "SmartData",
+            "TechCorp"
+          ],
+          "recall": 1.0,
+          "precision": 0.5,
+          "f1": 0.6666666666666666,
+          "hit": 3,
+          "n_pred": 6,
+          "n_gold": 3,
+          "n_cited": 48,
+          "cust_ids": [
+            "CUST-0018",
+            "CUST-0049",
+            "CUST-0055",
+            "CUST-0075",
+            "CUST-0079",
+            "CUST-0089",
+            "CUST-0092",
+            "CUST-0096",
+            "CUST-0107",
+            "CUST-0115"
+          ]
+        },
+        {
+          "question": "Find the names of companies were affected by issues in the database management of SearchFlow that caused slow search performance and impacted productivity?",
+          "kind": "issue",
+          "gold": [
+            "CloudSync",
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech"
+          ],
+          "pred": [
+            "BlueWave",
+            "CloudSync",
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech",
+            "InnovateAI",
+            "TechCorp"
+          ],
+          "recall": 1.0,
+          "precision": 0.5714285714285714,
+          "f1": 0.7272727272727273,
+          "hit": 4,
+          "n_pred": 7,
+          "n_gold": 4,
+          "n_cited": 46,
+          "cust_ids": [
+            "CUST-0018",
+            "CUST-0036",
+            "CUST-0075",
+            "CUST-0086",
+            "CUST-0089",
+            "CUST-0092",
+            "CUST-0096",
+            "CUST-0107",
+            "CUST-0115",
+            "CUST-0117"
+          ]
+        },
+        {
+          "question": "Find the name of company that has the maximum number of resolved bugs in SearchFlow",
+          "kind": "aggregation",
+          "gold": [
+            "FusionTech"
+          ],
+          "pred": [
+            "AITransformers",
+            "BlueWave",
+            "CloudSync",
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech",
+            "InnovateAI",
+            "NextGenTech",
+            "SmartData",
+            "TechCorp"
+          ],
+          "recall": 1.0,
+          "precision": 0.1,
+          "f1": 0.18181818181818182,
+          "hit": 1,
+          "n_pred": 10,
+          "n_gold": 1,
+          "n_cited": 259,
+          "cust_ids": [
+            "CUST-0018",
+            "CUST-0029",
+            "CUST-0036",
+            "CUST-0055",
+            "CUST-0075",
+            "CUST-0079",
+            "CUST-0080",
+            "CUST-0086",
+            "CUST-0089",
+            "CUST-0092",
+            "CUST-0096",
+            "CUST-0101",
+            "CUST-0107",
+            "CUST-0115",
+            "CUST-0117"
+          ]
+        },
+        {
+          "question": "Find the name of company that has the maximum number of unresolved bugs in SearchFlow?",
+          "kind": "aggregation",
+          "gold": [
+            "FusionTech"
+          ],
+          "pred": [
+            "AITransformers",
+            "BlueWave",
+            "CloudSync",
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech",
+            "InnovateAI",
+            "NextGenTech",
+            "SmartData",
+            "TechCorp"
+          ],
+          "recall": 1.0,
+          "precision": 0.1,
+          "f1": 0.18181818181818182,
+          "hit": 1,
+          "n_pred": 10,
+          "n_gold": 1,
+          "n_cited": 271,
+          "cust_ids": [
+            "CUST-0018",
+            "CUST-0029",
+            "CUST-0036",
+            "CUST-0049",
+            "CUST-0055",
+            "CUST-0075",
+            "CUST-0079",
+            "CUST-0080",
+            "CUST-0086",
+            "CUST-0089",
+            "CUST-0092",
+            "CUST-0096",
+            "CUST-0101",
+            "CUST-0107",
+            "CUST-0115",
+            "CUST-0117"
+          ]
+        }
+      ],
+      "note": "hop 1 = the question's cited artifacts from the HERB source"
+    },
+    "oracle_retrieval_k300_filtered_to_cited": {
+      "summary": {
+        "all7": {
+          "n": 7,
+          "recall": 1.0,
+          "precision": 0.5100340136054421,
+          "f1": 0.6389562818134247
+        },
+        "issue5": {
+          "n": 5,
+          "recall": 1.0,
+          "precision": 0.6521428571428571,
+          "f1": 0.7873959373959374
+        },
+        "agg2": {
+          "n": 2,
+          "recall": 1.0,
+          "precision": 0.15476190476190477,
+          "f1": 0.26785714285714285
+        }
+      },
+      "rows": [
+        {
+          "question": "Find the names of companies were affected by issues in the AI Model & Search Algorithm in SearchFlow that caused decreased search accuracy and disrupted workflow?",
+          "kind": "issue",
+          "gold": [
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech",
+            "NextGenTech",
+            "SmartData",
+            "TechCorp"
+          ],
+          "pred": [
+            "BlueWave",
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech",
+            "InnovateAI",
+            "NextGenTech",
+            "SmartData",
+            "TechCorp"
+          ],
+          "recall": 1.0,
+          "precision": 0.75,
+          "f1": 0.8571428571428571,
+          "hit": 6,
+          "n_pred": 8,
+          "n_gold": 6,
+          "k": 300
+        },
+        {
+          "question": "Find the names of companies were affected by issues in the backend search engine of SearchFlow that prevented retrieval of important historical messages, risking loss of critical information and user dissatisfaction?",
+          "kind": "issue",
+          "gold": [
+            "CloudSync",
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech",
+            "InnovateAI"
+          ],
+          "pred": [
+            "CloudSync",
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech",
+            "InnovateAI",
+            "SmartData",
+            "TechCorp"
+          ],
+          "recall": 1.0,
+          "precision": 0.7142857142857143,
+          "f1": 0.8333333333333333,
+          "hit": 5,
+          "n_pred": 7,
+          "n_gold": 5,
+          "k": 300
+        },
+        {
+          "question": "Find the names of companies were affected by issues in the SearchFlow user interface that caused frustration due to unresponsive interactions during search result loading?",
+          "kind": "issue",
+          "gold": [
+            "AITransformers",
+            "BlueWave",
+            "FusionTech",
+            "SmartData",
+            "TechCorp"
+          ],
+          "pred": [
+            "AITransformers",
+            "BlueWave",
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech",
+            "NextGenTech",
+            "SmartData",
+            "TechCorp"
+          ],
+          "recall": 1.0,
+          "precision": 0.625,
+          "f1": 0.7692307692307693,
+          "hit": 5,
+          "n_pred": 8,
+          "n_gold": 5,
+          "k": 300
+        },
+        {
+          "question": "Find the names of companies were affected by issues in the Search API of SearchFlow that posed security risks and potential data breaches?",
+          "kind": "issue",
+          "gold": [
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech"
+          ],
+          "pred": [
+            "CloudSync",
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech",
+            "SmartData"
+          ],
+          "recall": 1.0,
+          "precision": 0.6,
+          "f1": 0.7499999999999999,
+          "hit": 3,
+          "n_pred": 5,
+          "n_gold": 3,
+          "k": 300
+        },
+        {
+          "question": "Find the names of companies were affected by issues in the database management of SearchFlow that caused slow search performance and impacted productivity?",
+          "kind": "issue",
+          "gold": [
+            "CloudSync",
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech"
+          ],
+          "pred": [
+            "BlueWave",
+            "CloudSync",
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech",
+            "InnovateAI",
+            "TechCorp"
+          ],
+          "recall": 1.0,
+          "precision": 0.5714285714285714,
+          "f1": 0.7272727272727273,
+          "hit": 4,
+          "n_pred": 7,
+          "n_gold": 4,
+          "k": 300
+        },
+        {
+          "question": "Find the name of company that has the maximum number of resolved bugs in SearchFlow",
+          "kind": "aggregation",
+          "gold": [
+            "FusionTech"
+          ],
+          "pred": [
+            "BlueWave",
+            "CloudSync",
+            "ComputeWorks",
+            "FusionTech",
+            "NextGenTech",
+            "SmartData"
+          ],
+          "recall": 1.0,
+          "precision": 0.16666666666666666,
+          "f1": 0.2857142857142857,
+          "hit": 1,
+          "n_pred": 6,
+          "n_gold": 1,
+          "k": 300
+        },
+        {
+          "question": "Find the name of company that has the maximum number of unresolved bugs in SearchFlow?",
+          "kind": "aggregation",
+          "gold": [
+            "FusionTech"
+          ],
+          "pred": [
+            "BlueWave",
+            "CloudSync",
+            "ComputeWorks",
+            "DataSolutions",
+            "FusionTech",
+            "NextGenTech",
+            "SmartData"
+          ],
+          "recall": 1.0,
+          "precision": 0.14285714285714285,
+          "f1": 0.25,
+          "hit": 1,
+          "n_pred": 7,
+          "n_gold": 1,
+          "k": 300
+        }
+      ]
+    }
+  },
+  "p2": {
+    "n_members": 29,
+    "accuracy": 1.0
+  },
+  "p3": {
+    "mean_precision": 0.6904761904761905,
+    "by_kind": {
+      "all7": {
+        "n": 7,
+        "mean_precision": 0.6904761904761905,
+        "mean_surfaced": 3.5714285714285716
+      },
+      "issue5": {
+        "n": 5,
+        "mean_precision": 0.9666666666666666,
+        "mean_surfaced": 4.8
+      },
+      "agg2": {
+        "n": 2,
+        "mean_precision": 0.0,
+        "mean_surfaced": 0.5
+      }
+    },
+    "rows": [
+      {
+        "question": "Find the name of company that has the maximum number of resolved bugs in SearchFlow",
+        "n_hits": 20,
+        "n_surfaced": 1,
+        "n_gold": 13,
+        "n_correct": 0,
+        "precision": 0.0
+      },
+      {
+        "question": "Find the name of company that has the maximum number of unresolved bugs in SearchFlow?",
+        "n_hits": 20,
+        "n_surfaced": 0,
+        "n_gold": 13,
+        "n_correct": 0,
+        "precision": 0.0
+      },
+      {
+        "question": "Find the names of companies were affected by issues in the AI Model & Search Algorithm in SearchFlow that caused decreased search accuracy and disrupted workflow?",
+        "n_hits": 20,
+        "n_surfaced": 6,
+        "n_gold": 81,
+        "n_correct": 5,
+        "precision": 0.8333333333333334
+      },
+      {
+        "question": "Find the names of companies were affected by issues in the Search API of SearchFlow that posed security risks and potential data breaches?",
+        "n_hits": 20,
+        "n_surfaced": 6,
+        "n_gold": 45,
+        "n_correct": 6,
+        "precision": 1.0
+      },
+      {
+        "question": "Find the names of companies were affected by issues in the SearchFlow user interface that caused frustration due to unresponsive interactions during search result loading?",
+        "n_hits": 20,
+        "n_surfaced": 4,
+        "n_gold": 56,
+        "n_correct": 4,
+        "precision": 1.0
+      },
+      {
+        "question": "Find the names of companies were affected by issues in the backend search engine of SearchFlow that prevented retrieval of important historical messages, risking loss of critical information and user dissatisfaction?",
+        "n_hits": 20,
+        "n_surfaced": 4,
+        "n_gold": 65,
+        "n_correct": 4,
+        "precision": 1.0
+      },
+      {
+        "question": "Find the names of companies were affected by issues in the database management of SearchFlow that caused slow search performance and impacted productivity?",
+        "n_hits": 20,
+        "n_surfaced": 4,
+        "n_gold": 54,
+        "n_correct": 4,
+        "precision": 1.0
+      }
+    ]
+  }
+}
