@@ -69,7 +69,7 @@ characters; do not use it. Any nx failure raises `NxError`; nothing returns "" o
 
 ## The RDR-147 MVV (`--mvv`, nexus-bwct4.1)
 
-The MVV run (nexus-irndi) uses this mode; it spends (cap 4 USD total, `MVV_CAP_USD`) and refuses to start unless
+The MVV run (nexus-irndi) uses this mode; it spends (cap 4 USD per run date, `MVV_CAP_USD`) and refuses to start unless
 the sandbox guard is satisfied (`HERB_SANDBOX=1`, `HOME` and `NEXUS_CONFIG_DIR` under `.herb-sandbox`, no
 `NX_SERVICE_*`, `NX_PYTHON` a sandbox venv, `HERB_NEXUS_REV` set) **and the resolution switch is on**:
 
@@ -77,9 +77,17 @@ the sandbox guard is satisfied (`HERB_SANDBOX=1`, `HOME` and `NEXUS_CONFIG_DIR` 
 NX_ANSWER_RESOLUTION_REPAIR=1 HERB_NEXUS_REV=<sha> HERB_SANDBOX_LLM=1 \
     python3 <nexus>/tests/e2e/lib/claude_credentials.py run -- \
     $SB run python3 -m benchmark.herb_ladder --mvv
-python3 -m benchmark.herb_ladder --mvv --resume [DATE]   # after a stop: keeps the valid rows, same cap
+
+# after a stop: the same wrapper, DATE (YYYY-MM-DD, default today) of the stopped run; keeps its valid rows
+NX_ANSWER_RESOLUTION_REPAIR=1 HERB_NEXUS_REV=<sha> HERB_SANDBOX_LLM=1 \
+    python3 <nexus>/tests/e2e/lib/claude_credentials.py run -- \
+    $SB run python3 -m benchmark.herb_ladder --mvv --resume [DATE]
+
 python3 -m benchmark.herb_ladder --copy-scorecard-to <nexus>/docs/rdr/evidence/rdr-147   # then commit it in nexus
 ```
+
+The 4 USD cap is per run date: a `--resume` with another DATE, or a row file moved aside, starts a fresh cap, and
+`--cap-usd` overrides the cap itself. Within one date it is cumulative over every invocation.
 
 **The switch is environment-only.** nexus reads `NX_ANSWER_RESOLUTION_REPAIR` from the process environment and
 never from config, and it is off unless set to an on value (`1`, `true`, `yes`, `on`). The sandbox's `env -i`
@@ -93,7 +101,10 @@ Rules, as the code applies them (`join_completeness`, `precision_gate`, `score_m
 
 1. **Two runs per question**, labelled `a` and `b`, under one spend cap (`b` gets what `a` left). The cap is
    cumulative across `--resume`: each call is written to the cost ledger (label `mvv`, with `stage` a, b or
-   heldout and `mvv_run` the run date) and a resume starts from what the ledger already charged. A call whose
+   heldout and `mvv_run` the run date) and a resume starts from what the ledger already charged. The ledger
+   gets a reserve row (the per-call budget) before each call and a settled row after it; the last row per
+   `reserve_id` counts, so a call interrupted mid-way, or one whose reply could not be decoded, stays charged
+   at its reserve and the cap never undercounts a paid call. A call whose
    cost is unknown, or that failed, is charged its per-call budget (0.5 USD): a cap an unreadable cost can slip
    under is no cap.
 2. **Grown plans are disabled before every run.** `sweep_grown_plans` snapshots the id of every plan
@@ -108,7 +119,12 @@ Rules, as the code applies them (`join_completeness`, `precision_gate`, `score_m
    carrying the error text and the run goes on. Rows are appended to `results/herb/mvv-<date>.jsonl` as they
    land; `--resume` keeps the valid rows (the last row per label and question wins), reruns the rest and
    continues under the cumulative cap. A failed sweep still stops the run (no call starts on a sweep that may
-   have missed a grown plan); the rows so far are on disk.
+   have missed a grown plan); the rows so far are on disk. **An in-band error is a failed call too.** nexus
+   returns some errors with exit 0 and an envelope whose `final_text` opens `[non-answer: error]`,
+   `[non-answer: planner_error]` or `[budget exhausted ...]`; such a row is invalid with the notice as its
+   reason (`in_band_error`), never a zero-precision measurement, and its cost is still charged. The coverage
+   non-answers (`[non-answer: uncovered]`, `[non-answer: no_evidence]`) and a partial answer
+   (`[insufficient-evidence: ...]`) are findings about the branch and stay real rows.
 4. **Branch-entered columns.** Each row copies from the envelope's `repair` (the RepairReport,
    `coverage.repair`), tolerantly (an absent field is "not entered" or empty): `resolution_entered`,
    `resolution_reason`, `resolution_tokens`, `anchor_key_ids`, `resolved`, `missing`, `ambiguous`,

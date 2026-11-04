@@ -55,6 +55,7 @@ import re
 import subprocess
 import textwrap
 import time
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -154,6 +155,18 @@ RESOLUTION_SWITCH = "NX_ANSWER_RESOLUTION_REPAIR"
 COVERAGE_SWITCH = "NX_ANSWER_COVERAGE"
 
 DEFAULT_CAP_USD = 2.0
+
+#: The head of a ``final_text`` that says nx_answer stopped on an error: a degraded result, not an answer. nexus
+#: returns these IN BAND (the call exits 0 and prints an envelope), so without this check a budget-exhausted or
+#: errored call after spend reads as a valid zero-precision measurement of the branch. Sources, nexus 8096a1451:
+#: ``[non-answer: <shape>]`` with shape ``error`` (plan-match, plan-execution, single-step and input errors;
+#: core.py ``_error_result``, :13464-13468) or ``planner_error`` (core.py:13853-13857); and the budget-exhausted
+#: marker ``[budget exhausted (time|cost) after step N of M ...]`` (core.py:12538, built at :13520). The coverage
+#: non-answers (``[non-answer: uncovered]``, ``[non-answer: no_evidence]``, answer_shape.py:295-312) and a partial
+#: answer (``[insufficient-evidence: ...]``) are findings about what the branch retrieved, so they stay real rows.
+_IN_BAND_ERROR_RE = re.compile(r"\s*(?:\[non-answer: (?:error|planner_error)\]|\[budget exhausted)")
+IN_BAND_ERROR_NOTICE_CHARS = 240   # how much of the notice a row's invalid_reason carries
+_RUN_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 # --------------------------------------------------------------------------- #
@@ -711,10 +724,16 @@ def _append_cost_ledger(label: str, question: str, cost: float | None, **extra: 
 def ledger_spent(run_id: str | None) -> float:
     """What the MVV run *run_id* has already been charged: the sum of ``cost_usd`` over the ledger rows
     labelled ``mvv`` with ``mvv_run == run_id``. 0.0 for no run id or no ledger. A resume starts its cap
-    from this, so the cap is cumulative over every invocation of one run."""
+    from this, so the cap is cumulative over every invocation of one run.
+
+    A call writes a RESERVE row (``reserve_id``, ``settled`` false, charged its per-call budget) before it starts
+    and a SETTLED row with the same ``reserve_id`` after it returns. The last row per ``reserve_id`` counts, so a
+    settled call is charged once, at its actual cost, and a call that never settled (an interrupt, a decode
+    error) stays charged at its reserve. Rows without a ``reserve_id`` are summed as they stand."""
     if run_id is None or not _COST_LEDGER.exists():
         return 0.0
     total = 0.0
+    reserves: dict[str, float] = {}
     for line in _COST_LEDGER.read_text().splitlines():
         try:
             e = json.loads(line)
@@ -723,8 +742,12 @@ def ledger_spent(run_id: str | None) -> float:
         cost = e.get("cost_usd") if isinstance(e, dict) else None
         if (isinstance(e, dict) and e.get("run") == MVV_LEDGER_LABEL and e.get("mvv_run") == run_id
                 and isinstance(cost, (int, float)) and not isinstance(cost, bool)):
-            total += float(cost)
-    return total
+            rid = e.get("reserve_id")
+            if isinstance(rid, str):
+                reserves[rid] = float(cost)
+            else:
+                total += float(cost)
+    return total + sum(reserves.values())
 
 
 @dataclass
@@ -968,23 +991,42 @@ def repair_columns(report: Any) -> dict[str, Any]:
     return cols
 
 
+def in_band_error(final_text: Any) -> str | None:
+    """The notice (its first ``IN_BAND_ERROR_NOTICE_CHARS`` characters) when *final_text* opens with an error-shape
+    marker nexus returns in band, else None. See ``_IN_BAND_ERROR_RE`` for what counts and what does not."""
+    if not isinstance(final_text, str) or _IN_BAND_ERROR_RE.match(final_text) is None:
+        return None
+    return final_text.strip()[:IN_BAND_ERROR_NOTICE_CHARS]
+
+
 def _guarded_nx_answer(question: str, plan_library: Any | None, budget: float, max_steps: int,
-                       timeout: int) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+                       timeout: int, before_call: Callable[[], None] | None = None,
+                       ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """One nx_answer run behind the grown-plan sweep. Returns (envelope or None when the call failed, the columns
     every row carries: plan, validity, plans disabled before the run with their tags, the RepairReport fields).
 
     A failed call (``NxError``: exit, timeout, no envelope) is an INVALID row carrying the error text, never an
-    exception: one bad call must not lose the paid rows around it. A failed SWEEP still raises: no run starts on
-    a sweep that may have missed a grown plan (the rows so far are on disk; resume continues). Without a plan
-    library the run is recorded but never valid: nothing showed it was off a grown plan."""
+    exception: one bad call must not lose the paid rows around it. So is a call that returned an in-band error
+    notice (``in_band_error``): it is not a measurement of the branch, and the envelope still comes back so its
+    cost is charged. A failed SWEEP still raises: no run starts on a sweep that may have missed a grown plan (the
+    rows so far are on disk; resume continues). Without a plan library the run is recorded but never valid:
+    nothing showed it was off a grown plan. *before_call* runs after the sweep and just before the call (the
+    spend reserve): a sweep that raises has reserved nothing."""
     sweep = sweep_grown_plans(plan_library) if plan_library is not None else None
     base = {"plans_disabled_before": sweep.disabled if sweep else [],
             "plans_disabled_records": sweep.records if sweep else []}
+    if before_call is not None:
+        before_call()
     try:
         env = nx_answer_call(question, corpus_arg(PRODUCT), max_steps, timeout, budget_usd=budget)
     except NxError as e:
         return None, {**base, "plan_id": None, "valid": False, "invalid_reason": f"nx_answer error: {e}",
                       "plan_grown_by_call": False, "error": str(e), **repair_columns(None)}
+    notice = in_band_error(env.get("final_text"))
+    if notice is not None:
+        return env, {**base, "plan_id": env.get("plan_id"), "valid": False,
+                     "invalid_reason": f"nx_answer returned an error notice: {notice}",
+                     "plan_grown_by_call": False, "error": notice, **repair_columns(env.get("repair"))}
     grown_by_call = False
     if sweep is not None:
         valid, why, grown_by_call = plan_validity(plan_library, env.get("plan_id"), sweep.snapshot)
@@ -1003,13 +1045,31 @@ def _kept(prior: Mapping[tuple[str, str], Mapping[str, Any]] | None, label: str,
 def _execute(question: str, *, label: str, ledger_label: str, run_id: str | None, plan_library: Any | None,
              budget: Budget, max_steps: int, timeout: int) -> tuple[dict[str, Any], dict[str, Any], Any, float]:
     """One guarded call, charged to *budget* and written to the cost ledger. Returns (envelope or {}, row
-    columns, the recorded cost or None, the cost charged)."""
+    columns, the recorded cost or None, the cost charged).
+
+    The ledger gets a RESERVE row (the per-call budget) after the sweep and before the call, and a settled row
+    after it: ``ledger_spent`` never undercounts a paid call. Any exception out of the call (an interrupt, a
+    decode error that is not an ``NxError``) leaves the reserve in place and charges it to *budget*."""
     per_call = budget.per_call()
-    env, cols = _guarded_nx_answer(question, plan_library, per_call, max_steps, timeout)
+    reserve_id = uuid.uuid4().hex
+    reserved = False
+
+    def reserve() -> None:
+        nonlocal reserved
+        _append_cost_ledger(ledger_label, question, per_call, stage=label, mvv_run=run_id,
+                            reserve_id=reserve_id, settled=False)
+        reserved = True
+
+    try:
+        env, cols = _guarded_nx_answer(question, plan_library, per_call, max_steps, timeout, before_call=reserve)
+    except BaseException:
+        if reserved:
+            budget.spent += per_call
+        raise
     cost = None if env is None else env.get("cost_usd")
     charged = budget.charge(cost, per_call)
-    _append_cost_ledger(ledger_label, question, charged, stage=label, mvv_run=run_id,
-                        cost_recorded=cost is not None, error=env is None)
+    _append_cost_ledger(ledger_label, question, charged, stage=label, mvv_run=run_id, reserve_id=reserve_id,
+                        settled=True, cost_recorded=cost is not None, error="error" in cols)
     return env or {}, cols, cost, charged
 
 
@@ -1698,6 +1758,18 @@ def emit_scorecard(k: int = 20, nx_answer: bool = False, cap_usd: float = DEFAUL
     return card
 
 
+def valid_run_date(date: str) -> str:
+    """*date* as a run id: ``YYYY-MM-DD`` and a real date, or ``NxError``. It names ``mvv-<date>.json(l)`` and keys
+    the cost ledger, so nothing else (a path, a short date) may through."""
+    if _RUN_DATE_RE.fullmatch(date) is None:
+        raise NxError(f"--resume {date!r} is not a date: use YYYY-MM-DD")
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError as e:
+        raise NxError(f"--resume {date!r} is not a date: use YYYY-MM-DD") from e
+    return date
+
+
 def emit_mvv(cap_usd: float = MVV_CAP_USD, date: str | None = None, resume: bool = False,
              plan_library: Any | None = None) -> dict[str, Any]:
     """The RDR-147 MVV, recorded on its own (nexus-bwct4.1 fix round 1).
@@ -1710,6 +1782,8 @@ def emit_mvv(cap_usd: float = MVV_CAP_USD, date: str | None = None, resume: bool
     ``mvv`` section into ``herb-scorecard.json``; ``step0-baselines.json`` and every other rung are untouched
     (``tests/test_herb_ladder.py`` reads the Step 0 nx_answer record from it). No other rung is re-measured:
     the spend is the MVV's nx_answer calls only."""
+    if date:
+        valid_run_date(date)
     bad = mvv_switch_violations(os.environ)
     if bad:
         raise NxError("the MVV refuses to spend: " + "; ".join(bad))
@@ -1830,6 +1904,11 @@ def main() -> None:
     if args.mvv and args.nx_answer:
         ap.error("--mvv is its own run (two labelled runs, the held-out set): do not combine it with --nx-answer")
     cap = args.cap_usd if args.cap_usd is not None else (MVV_CAP_USD if args.mvv else DEFAULT_CAP_USD)
+    if args.resume:
+        try:
+            valid_run_date(args.resume)
+        except NxError as e:
+            ap.error(str(e))
     if args.mvv:
         emit_mvv(cap_usd=cap, date=args.resume or None, resume=args.resume is not None)
         return

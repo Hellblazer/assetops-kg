@@ -185,7 +185,7 @@ def test_nx_answer_rung_scores_precision_and_stops_at_the_cost_cap(monkeypatch):
     assert (rows[0]["recall"], rows[0]["precision"]) == (1.0, 0.5)
     assert rows[1]["precision"] == 1.0
     assert [("skipped" in r) for r in rows] == [False, False, True, True]
-    ledger = [json.loads(line) for line in herb_ladder._COST_LEDGER.read_text().splitlines()]
+    ledger = _settled(_ledger_rows())
     assert [e["cost_usd"] for e in ledger] == [1.0, 1.0]
     assert meta["complete"] is False and meta["total_cost_usd"] == 2.0
 
@@ -1942,6 +1942,16 @@ def test_a_heldout_row_carries_the_same_columns(monkeypatch):
 # --- a failed call is a row, not the end of the run ---
 
 
+def _ledger_rows() -> list[dict]:
+    path = herb_ladder._COST_LEDGER
+    return [json.loads(l) for l in path.read_text().splitlines()] if path.exists() else []
+
+
+def _settled(rows: list[dict]) -> list[dict]:
+    """The ledger rows a call leaves behind once it returned: its reserve rows left out."""
+    return [r for r in rows if r.get("settled") is not False]
+
+
 def test_an_nx_error_becomes_an_invalid_row_with_the_error_text_and_the_run_goes_on(monkeypatch):
     log: list = []
     lib = FakeLibrary([BUILTIN], log)
@@ -1954,7 +1964,7 @@ def test_an_nx_error_becomes_an_invalid_row_with_the_error_text_and_the_run_goes
     assert bad["resolution_entered"] is False and bad["pred"] == []
     assert all(r["valid"] for r in rows[:1] + rows[2:])
     assert meta["total_cost_usd"] == pytest.approx(4 * 0.1 + 0.5)     # the failed call is charged its budget
-    ledger = [json.loads(l) for l in herb_ladder._COST_LEDGER.read_text().splitlines()]
+    ledger = _settled(_ledger_rows())
     assert [e["cost_usd"] for e in ledger] == [0.1, 0.5, 0.1, 0.1, 0.1] and ledger[1]["error"] is True
 
 
@@ -1988,6 +1998,229 @@ def test_an_unknown_cost_is_charged_the_per_call_budget_and_the_cap_still_holds(
     assert [("skipped" in r) for r in rows] == [False] * 4 + [True] * 2
     assert meta["total_cost_usd"] == pytest.approx(2.0) and meta["runs_with_unknown_cost"] == 4
     assert rows[0]["cost_usd"] is None and rows[0]["cost_charged_usd"] == 0.5
+
+
+# --- an in-band nx_answer error is an INVALID row, not a valid zero-precision measurement (fix round 2, N1) ---
+
+# Literal notices as nexus 8096a1451 returns them in band (the call exits 0 and prints an envelope).
+# core.py ``_error_result`` (:13464-13468) formats f"{NON_ANSWER_NOTICE_PREFIX} {shape}] {text}", and
+# ``NON_ANSWER_NOTICE_PREFIX`` is "[non-answer:" (plans/answer_shape.py:257).
+IN_BAND_ERRORS = [
+    # shape "error": plan execution (core.py:14726 and :15006), plan match (:13797), a refused retrieval step's
+    # exception text (:14215, :14268), an input check (:13689)
+    "[non-answer: error] Error during plan execution: operator timed out",
+    "[non-answer: error] Error during plan match: engine down",
+    "[non-answer: error] scope refused by the retrieval step",
+    "[non-answer: error] min_confidence must be in [0.0, 1.0], got 2.0",
+    # shape "planner_error" (core.py:13853-13857)
+    "[non-answer: planner_error] No matching plan found and inline planner failed: boom. Try rephrasing, or use "
+    "search/query directly.",
+    # the budget-exhausted marker: prefix core.py:12538, built at :13520-13523 (kind time or cost, :13509-13512),
+    # followed by the partial answer
+    "[budget exhausted (time) after step 2 of 5 — partial answer]\n\nAcme",
+    "[budget exhausted (cost) after step 1 of 3 — partial answer]",
+]
+# Real measurements: the coverage non-answers (plans/answer_shape.py:295-312 renders them; shapes no_evidence and
+# uncovered), a partial answer (``INSUFFICIENT_EVIDENCE_NOTICE_PREFIX``, answer_shape.py:250), and prose.
+REAL_MEASUREMENTS = [
+    "[non-answer: uncovered] The plan (plan_id=3, 4 steps) retrieved evidence, but none of it covered a requested "
+    "part of the question, so no answer is given.",
+    "[non-answer: no_evidence] The plan (plan_id=3, 4 steps) ran, but no usable evidence reached the reduction. "
+    "Nothing was reduced.",
+    "[non-answer: retrieval_only] The plan ran and returned a retrieval payload",
+    "[insufficient-evidence: 2 unresolved]\n\nAcme",
+    "Acme",
+]
+
+
+@pytest.mark.parametrize("notice", IN_BAND_ERRORS)
+def test_an_in_band_error_notice_is_an_invalid_row_with_the_notice_as_its_reason(monkeypatch, notice):
+    log: list = []
+    lib = FakeLibrary([BUILTIN], log)
+    ans = FakeAnswer(lib, log, final=notice, cost=0.1)
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", ans)
+    rows, meta = herb_ladder.run_nx_answer_rows(_issue_qs(5), UNIVERSE, 2.0, plan_library=lib)
+    assert ans.n == 5 and len(rows) == 5                            # the run goes on past it
+    for r in rows:
+        assert r["valid"] is False and notice.strip()[:60] in r["invalid_reason"] and r["error"].startswith("[")
+        assert "grown plan" not in r["invalid_reason"]              # the notice is the reason, not the plan
+    assert meta["total_cost_usd"] == pytest.approx(5 * 0.1)         # the call was paid for: it is still charged
+    assert herb_ladder.join_completeness(rows, REGISTRY)["verdict"] == "invalid"
+    assert herb_ladder.precision_gate(rows)["verdict"] == "invalid"
+
+
+@pytest.mark.parametrize("final", REAL_MEASUREMENTS)
+def test_a_coverage_non_answer_a_partial_answer_and_prose_stay_real_valid_rows(monkeypatch, final):
+    log: list = []
+    lib = FakeLibrary([BUILTIN], log)
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", FakeAnswer(lib, log, final=final, repair=ANCHOR_REPORT))
+    rows, _ = herb_ladder.run_nx_answer_rows(_issue_qs(5), UNIVERSE, 2.0, plan_library=lib)
+    assert all(r["valid"] is True and r["invalid_reason"] == "" and "error" not in r for r in rows)
+    assert herb_ladder.precision_gate(rows)["verdict"] in ("passed", "failed")     # a measurement, not invalid
+
+
+def test_in_band_error_reads_only_the_head_of_a_string():
+    assert herb_ladder.in_band_error("  \n[non-answer: error] x") == "[non-answer: error] x"
+    assert herb_ladder.in_band_error("The run said [non-answer: error] in passing") is None
+    assert herb_ladder.in_band_error("An answer that mentions a [budget exhausted] marker") is None
+    assert herb_ladder.in_band_error(None) is None and herb_ladder.in_band_error({"x": 1}) is None
+    assert herb_ladder.in_band_error("[non-answer: error] " + "x" * 1000) is not None
+    assert len(herb_ladder.in_band_error("[non-answer: error] " + "x" * 1000)) == herb_ladder.IN_BAND_ERROR_NOTICE_CHARS
+
+
+def test_an_in_band_error_is_an_invalid_heldout_row_too(monkeypatch):
+    log: list = []
+    lib = FakeLibrary([BUILTIN], log)
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", FakeAnswer(lib, log, final=IN_BAND_ERRORS[0]))
+    held = [{"herb_index": 0, "question": "h0", "type": "content", "ground_truth": "g", "citations": ["c"]}]
+    rows, meta = herb_ladder.run_heldout_rows(held, 2.0, lib)
+    assert rows[0]["valid"] is False and "plan execution" in rows[0]["invalid_reason"]
+    assert meta["total_cost_usd"] == pytest.approx(0.1)
+
+
+def test_the_non_dict_driver_path_with_an_error_notice_is_invalid(monkeypatch):
+    """run_herb.py's driver maps a non-dict nx_answer return (the text form) to plan_id None and the text as
+    final_text: the notice is still at its head."""
+    log: list = []
+    lib = FakeLibrary([BUILTIN], log)
+
+    def text_form(question, scope, max_steps, timeout, budget_usd=0.5):
+        log.append(("run", question))
+        return {"final_text": IN_BAND_ERRORS[4], "chunks": [], "evidence_texts": [], "plan_id": None,
+                "step_count": None, "cost_usd": None, "duration_ms": None, "repair": None}
+
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", text_form)
+    rows, meta = herb_ladder.run_nx_answer_rows(_issue_qs(1), UNIVERSE, 2.0, plan_library=lib)
+    assert rows[0]["valid"] is False and "planner_error" in rows[0]["invalid_reason"]
+    assert rows[0]["plan_id"] is None and meta["runs_with_unknown_cost"] == 1      # unknown cost: charged the budget
+
+
+def test_a_run_that_only_failed_in_band_is_invalid_not_failed(monkeypatch):
+    """The cost of misreading: five budget-exhausted calls must not read as 'the branch scored zero'."""
+    log: list = []
+    lib = FakeLibrary([BUILTIN], log)
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", FakeAnswer(lib, log, final=IN_BAND_ERRORS[5]))
+    held: list = []
+    out = herb_ladder.run_mvv(_issue_qs(5), UNIVERSE, REGISTRY, held, 4.0, lib, run_id=RUN_ID)
+    assert out["score"]["verdict"] == "invalid"
+
+
+# --- the cost ledger reserves before a call and settles after it (fix round 2, N2) ---
+
+
+def test_a_reserve_row_is_on_the_ledger_while_the_call_is_in_flight(monkeypatch):
+    log: list = []
+    lib = FakeLibrary([BUILTIN], log)
+    seen = {}
+    inner = FakeAnswer(lib, log, cost=0.1)
+
+    def watching(question, scope, max_steps, timeout, budget_usd=0.5):
+        seen["rows"] = _ledger_rows()
+        seen["spent"] = herb_ladder.ledger_spent(RUN_ID)
+        seen["budget_usd"] = budget_usd
+        return inner(question, scope, max_steps, timeout, budget_usd)
+
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", watching)
+    herb_ladder.run_nx_answer_rows(_issue_qs(1), UNIVERSE, 2.0, plan_library=lib, ledger_label="mvv", run_id=RUN_ID)
+    (reserve,) = seen["rows"]
+    assert reserve["settled"] is False and reserve["cost_usd"] == 0.5 and reserve["stage"] == "run"
+    assert reserve["run"] == "mvv" and reserve["mvv_run"] == RUN_ID and reserve["reserve_id"]
+    assert seen["spent"] == pytest.approx(0.5) and seen["budget_usd"] == 0.5     # charged at its per-call budget
+
+
+def test_the_reserve_is_the_per_call_budget_which_is_what_is_left_under_a_small_cap(monkeypatch):
+    log: list = []
+    lib = FakeLibrary([BUILTIN], log)
+    seen = {}
+    inner = FakeAnswer(lib, log, cost=0.1)
+
+    def watching(question, scope, max_steps, timeout, budget_usd=0.5):
+        seen["spent"] = herb_ladder.ledger_spent(RUN_ID)
+        return inner(question, scope, max_steps, timeout, budget_usd)
+
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", watching)
+    herb_ladder.run_nx_answer_rows(_issue_qs(1), UNIVERSE, 0.3, plan_library=lib, ledger_label="mvv", run_id=RUN_ID)
+    assert seen["spent"] == pytest.approx(0.3)
+
+
+def test_a_returned_call_replaces_its_reserve_with_the_actual_cost_and_counts_once(monkeypatch):
+    log: list = []
+    lib = FakeLibrary([BUILTIN], log)
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", FakeAnswer(lib, log, cost=0.1))
+    herb_ladder.run_nx_answer_rows(_issue_qs(2), UNIVERSE, 2.0, plan_library=lib, ledger_label="mvv", run_id=RUN_ID)
+    rows = _ledger_rows()
+    assert [(r["settled"], r["cost_usd"]) for r in rows] == [(False, 0.5), (True, 0.1), (False, 0.5), (True, 0.1)]
+    assert rows[0]["reserve_id"] == rows[1]["reserve_id"] != rows[2]["reserve_id"] == rows[3]["reserve_id"]
+    assert herb_ladder.ledger_spent(RUN_ID) == pytest.approx(0.2)         # not 0.5 + 0.1 twice, not 1.0
+
+
+def test_a_failed_call_settles_at_its_per_call_budget_not_twice(monkeypatch):
+    log: list = []
+    lib = FakeLibrary([BUILTIN], log)
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", FakeAnswer(lib, log, fail_on=[1]))
+    herb_ladder.run_nx_answer_rows(_issue_qs(1), UNIVERSE, 2.0, plan_library=lib, ledger_label="mvv", run_id=RUN_ID)
+    assert herb_ladder.ledger_spent(RUN_ID) == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize("exc", [KeyboardInterrupt(), json.JSONDecodeError("Expecting value", "", 0),
+                                 RuntimeError("anything")], ids=["interrupt", "decode", "other"])
+def test_an_exception_mid_call_leaves_the_reserve_counted(monkeypatch, exc):
+    log: list = []
+    lib = FakeLibrary([BUILTIN], log)
+    ok = FakeAnswer(lib, log, cost=0.1)
+
+    def dies_on_second(question, scope, max_steps, timeout, budget_usd=0.5):
+        if ok.n == 1:
+            raise exc
+        return ok(question, scope, max_steps, timeout, budget_usd)
+
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", dies_on_second)
+    budget = herb_ladder.Budget(4.0)
+    with pytest.raises(type(exc)):
+        herb_ladder.run_nx_answer_rows(_issue_qs(3), UNIVERSE, 4.0, plan_library=lib, budget=budget,
+                                       ledger_label="mvv", run_id=RUN_ID)
+    assert ok.n == 1
+    assert herb_ladder.ledger_spent(RUN_ID) == pytest.approx(0.1 + 0.5)   # the paid first call, and the lost one
+    assert budget.spent == pytest.approx(0.1 + 0.5)                        # the in-process budget agrees
+    # a resume starts from that and so cannot spend what the interrupted call may have cost
+    assert herb_ladder.Budget(4.0, spent=herb_ladder.ledger_spent(RUN_ID)).remaining == pytest.approx(3.4)
+
+
+def test_a_sweep_that_fails_before_the_call_reserves_nothing(monkeypatch):
+    log: list = []
+    lib = FakeLibrary([{"id": 7, "tags": "grown"}], log, refuse=[7])
+    ans = FakeAnswer(lib, log)
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", ans)
+    budget = herb_ladder.Budget(4.0)
+    with pytest.raises(herb_ladder.NxError):
+        herb_ladder.run_nx_answer_rows(_issue_qs(1), UNIVERSE, 4.0, plan_library=lib, budget=budget,
+                                       ledger_label="mvv", run_id=RUN_ID)
+    assert ans.n == 0 and _ledger_rows() == [] and budget.spent == 0.0
+
+
+def test_ledger_spent_takes_the_last_row_per_reserve_and_sums_the_rest():
+    def row(cost, rid=None, run=RUN_ID, label="mvv"):
+        return {"run": label, "mvv_run": run, "cost_usd": cost, **({"reserve_id": rid} if rid else {})}
+    herb_ladder._COST_LEDGER.write_text("\n".join(json.dumps(e) for e in [
+        row(0.5, "r1"), row(0.1, "r1"),             # settled: counts 0.1
+        row(0.5, "r2"),                             # never settled: counts its reserve
+        row(0.3),                                   # a row without a reserve id: as it stands
+        row(0.5, "r3", run="2026-11-03"),           # another day's reserve
+        row(0.5, "r4", label="a"),                  # a Step 0 run's reserve
+    ]) + "\n")
+    assert herb_ladder.ledger_spent(RUN_ID) == pytest.approx(0.1 + 0.5 + 0.3)
+
+
+def test_an_interrupted_mvv_resumes_under_a_cap_that_counts_the_lost_call(monkeypatch, tmp_path):
+    lib, log, ans, sink, _ = _first_pass(monkeypatch, tmp_path, cost=0.1, cap=1.0, nq=3)   # 6 runs, 0.6 spent
+
+    def interrupted(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        herb_ladder.run_mvv_nx_answer(_issue_qs(4), UNIVERSE, 1.0, lib, run_id=RUN_ID, sink=sink, prior=sink.load())
+    assert herb_ladder.ledger_spent(RUN_ID) == pytest.approx(0.6 + 0.4)     # q4 in run a: reserve = what the cap had left
 
 
 # --- rows land as they are made; a resume keeps the valid ones; the cap is cumulative ---
@@ -2092,7 +2325,7 @@ def test_the_mvv_ledger_label_is_mvv_with_the_stage_beside_it(monkeypatch):
     monkeypatch.setattr(herb_ladder, "nx_answer_call", FakeAnswer(lib, log, repair=ANCHOR_REPORT))
     held = [{"herb_index": 0, "question": "h0", "type": "content", "ground_truth": "g", "citations": ["c"]}]
     herb_ladder.run_mvv(_issue_qs(5), UNIVERSE, REGISTRY, held, 4.0, lib, run_id=RUN_ID)
-    ledger = [json.loads(l) for l in herb_ladder._COST_LEDGER.read_text().splitlines()]
+    ledger = _settled(_ledger_rows())
     assert len(ledger) == 11 and {e["run"] for e in ledger} == {"mvv"} and {e["mvv_run"] for e in ledger} == {RUN_ID}
     assert [e["stage"] for e in ledger] == ["a"] * 5 + ["b"] * 5 + ["heldout"]
     assert herb_ladder.ledger_spent(RUN_ID) == pytest.approx(1.1)
@@ -2300,11 +2533,74 @@ def test_build_no_longer_has_an_mvv_mode_and_never_writes_the_mvv_into_the_step0
 # --- docs and the wrapper: the switch is env-only and the sandbox lets it through ---
 
 
+def _readme() -> str:
+    """The README with its line wraps and indentation collapsed to single spaces."""
+    return " ".join((REPO / "benchmark" / "README-herb.md").read_text().split())
+
+
 def test_the_readme_says_the_resolution_switch_is_env_only():
-    text = (REPO / "benchmark" / "README-herb.md").read_text()
-    assert "NX_ANSWER_RESOLUTION_REPAIR" in text
+    text = _readme()
+    assert ("**The switch is environment-only.** nexus reads `NX_ANSWER_RESOLUTION_REPAIR` from the process "
+            "environment and never from config, and it is off unless set to an on value (`1`, `true`, `yes`, `on`).") in text
     assert "sandbox's own config carries the resolution switch" not in text
-    assert "mvv-<date>.json" in text and "--resume" in text and "invalid" in text
+    assert ("`--mvv` refuses before the first sweep, call or ledger row unless it is an on value in the harness's "
+            "own environment") in text
+
+
+def test_the_readme_says_what_an_invalid_verdict_is():
+    assert ("`invalid` (a run is missing, or a row did not run validly or was skipped: not a measurement, rerun "
+            "with `--resume`, never a finding)") in _readme()
+
+
+def test_the_readme_resume_command_carries_the_whole_sandbox_wrapper():
+    text = (REPO / "benchmark" / "README-herb.md").read_text()
+    lines = text.splitlines()
+    (i,) = [n for n, l in enumerate(lines) if "benchmark.herb_ladder --mvv --resume" in l and l.startswith("    ")]
+    assert lines[i] == "    $SB run python3 -m benchmark.herb_ladder --mvv --resume [DATE]"
+    assert lines[i - 1] == "    python3 <nexus>/tests/e2e/lib/claude_credentials.py run -- \\"
+    assert lines[i - 2] == "NX_ANSWER_RESOLUTION_REPAIR=1 HERB_NEXUS_REV=<sha> HERB_SANDBOX_LLM=1 \\"
+    # and no bare resume line is left beside it
+    assert not [l for l in lines if l.startswith("python3 -m benchmark.herb_ladder --mvv --resume")]
+
+
+def test_the_readme_says_the_cap_is_per_run_date_and_cap_usd_overrides_it():
+    text = _readme()
+    assert "The 4 USD cap is per run date: a `--resume` with another DATE, or a row file moved aside, starts a " \
+           "fresh cap, and `--cap-usd` overrides the cap itself." in text
+    assert "(cap 4 USD per run date, `MVV_CAP_USD`)" in text and "cap 4 USD total" not in text
+
+
+def test_the_readme_says_an_in_band_error_is_an_invalid_row():
+    text = _readme()
+    assert ("An in-band error is a failed call too.** nexus returns some errors with exit 0 and an envelope whose "
+            "`final_text` opens `[non-answer: error]`, `[non-answer: planner_error]` or `[budget exhausted ...]`; "
+            "such a row is invalid with the notice as its reason") in text
+    assert "The coverage non-answers (`[non-answer: uncovered]`, `[non-answer: no_evidence]`)" in text
+
+
+@pytest.mark.parametrize("bad", ["../2026-11-04", "2026-11-04/../..", "2026-1-5", "20261104", "2026-13-45",
+                                 "2026-02-30", "2026-11-04 ", "latest", "x" * 40])
+def test_resume_refuses_a_date_that_is_not_yyyy_mm_dd_before_anything_else(monkeypatch, tmp_path, bad):
+    w = _emit_world(monkeypatch, tmp_path)
+    before = sorted(p.name for p in w.results.iterdir())
+    with pytest.raises(herb_ladder.NxError, match="YYYY-MM-DD"):
+        herb_ladder.emit_mvv(cap_usd=4.0, date=bad, plan_library=w.lib, resume=True)
+    assert w.ans.n == 0 and sorted(p.name for p in w.results.iterdir()) == before and _ledger_rows() == []
+
+
+def test_the_run_date_check_accepts_a_real_date_and_returns_it():
+    assert herb_ladder.valid_run_date("2026-11-04") == "2026-11-04"
+    assert herb_ladder.valid_run_date("2028-02-29") == "2028-02-29"
+    with pytest.raises(herb_ladder.NxError):
+        herb_ladder.valid_run_date("2027-02-29")
+
+
+def test_main_refuses_a_resume_date_that_is_not_a_date_before_it_calls_emit_mvv(monkeypatch, capsys):
+    monkeypatch.setattr(herb_ladder, "emit_mvv", lambda **kw: pytest.fail("ran"))
+    monkeypatch.setattr(sys, "argv", ["herb_ladder", "--mvv", "--resume", "../x"])
+    with pytest.raises(SystemExit) as e:
+        herb_ladder.main()
+    assert e.value.code == 2 and "YYYY-MM-DD" in capsys.readouterr().err
 
 
 def test_the_sandbox_wrapper_passes_the_resolution_switch_through_its_allowlist():
