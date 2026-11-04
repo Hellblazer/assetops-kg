@@ -36,6 +36,9 @@ import argparse
 import json
 import os
 import re
+import subprocess
+import textwrap
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +50,8 @@ from benchmark.multihop_resolve import (  # type: ignore
     CORPUS,
     HERB_DIR,
     _RE_CUST,
+    _RE_COMPANY,
+    SEARCH_TIMEOUT_S,
     NxError,
     answer_company,
     companies_for_ids,
@@ -54,6 +59,8 @@ from benchmark.multihop_resolve import (  # type: ignore
     search_hits,
 )
 from benchmark.run_herb import (  # type: ignore
+    _NXA_SENTINEL,
+    CONEXUS_PYTHON,
     corpus_arg,
     flatten_artifacts,
     nx_answer_call,
@@ -265,19 +272,144 @@ def score_p1_link_recall_precision(
     return None, None
 
 
-def score_p2_resolution_accuracy(members: dict[str, str]) -> float:
-    """P2: given a CORRECT CUST id, does resolution return the right company?
+# The P2 rung resolves the member customers through nexus's `resolve` step (RDR-147 Step 3,
+# nexus-v9v5r): ONE `resolve_keys` call over every token, in the conexus interpreter, then one
+# batched `store_get_many` for the resolved records' text. The driver refuses a non-loopback
+# service URL before any request, so a stray ambient config cannot send it to a live tenant.
+_RESOLVE_DRIVER = textwrap.dedent(
+    """
+    import json, sys, time
+    from urllib.parse import urlparse
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+    from nexus.mcp.core import store_get_many
+    from nexus.plans.resolve_step import resolve_keys
 
-    Hop 1 is bypassed (gold ids fed directly), isolating the exact ``where title=`` lookup.
-    Graded over the 29 member customers the corpus holds. An error from nx raises."""
-    if not members:
-        return 0.0
-    hits = 0
+    class Spy:
+        def __init__(self, inner):
+            self.inner, self.lookups = inner, 0
+        def find_by_title_exact(self, *a, **kw):
+            self.lookups += 1
+            return self.inner.find_by_title_exact(*a, **kw)
+        def get_manifests(self, *a, **kw):
+            return self.inner.get_manifests(*a, **kw)
+
+    tokens = json.load(open(sys.argv[1]))
+    cat = HttpCatalogClient()
+    url = str(cat._base_url)
+    print("resolve service url: " + url, file=sys.stderr, flush=True)
+    if urlparse(url).hostname not in ("127.0.0.1", "localhost", "::1"):
+        raise SystemExit("refusing non-loopback service url " + url)
+    spy = Spy(cat)
+    t0 = time.perf_counter()
+    res = resolve_keys(spy, tokens)
+    resolve_s = time.perf_counter() - t0
+    flat_ids, flat_colls, owner = [], [], []
+    for tok, bt in res["by_token"].items():
+        for i, c in zip(bt["ids"], bt["collections"]):
+            flat_ids.append(i); flat_colls.append(c); owner.append(tok)
+    texts = {{tok: "" for tok in res["by_token"]}}
+    if flat_ids:
+        got = store_get_many(flat_ids, flat_colls, max_chars_per_doc=100000, structured=True)
+        for tok, body in zip(owner, got["contents"]):
+            texts[tok] += (body or "") + "\\n"
+    print("{sentinel}" + json.dumps({{
+        "service_url": url, "result": res, "texts": texts,
+        "lookups": spy.lookups, "resolve_s": resolve_s,
+    }}))
+    """
+).format(sentinel=_NXA_SENTINEL)
+
+
+def resolve_p2_tokens(tokens: list[str]) -> dict[str, Any]:
+    """ONE ``resolve_keys`` call over *tokens* against the sandbox catalog, via the conexus interpreter.
+
+    Returns ``{service_url, result, texts, lookups, resolve_s}``: ``result`` is the step's own output
+    (``tumblers, ids, collections, by_token, missing, ambiguous``), ``texts`` the joined chunk text of
+    each resolved token's record. Raises ``NxError`` on a subprocess failure or a missing result line."""
+    import tempfile
+
+    if os.environ.get("HERB_SANDBOX") != "1":
+        raise NxError("resolve_p2_tokens reaches a nexus service: run it through benchmark/herb_sandbox.sh "
+                      "(HERB_SANDBOX=1), never against the operator's own or the managed service")
+    if not CONEXUS_PYTHON.exists():
+        raise NxError(f"nx interpreter not found at {CONEXUS_PYTHON}; set NX_PYTHON")
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tf:
+        json.dump(tokens, tf)
+        tmp = tf.name
+    try:
+        proc = subprocess.run(
+            [str(CONEXUS_PYTHON), "-c", _RESOLVE_DRIVER, tmp],
+            capture_output=True, timeout=SEARCH_TIMEOUT_S, check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise NxError(f"resolve driver failed (exit {e.returncode}): {(e.stderr or b'').decode(errors='replace')[-600:]}") from e
+    except subprocess.TimeoutExpired as e:
+        raise NxError(f"resolve driver timed out after {SEARCH_TIMEOUT_S}s") from e
+    finally:
+        os.unlink(tmp)
+    for line in proc.stdout.decode(errors="replace").splitlines():
+        if line.startswith(_NXA_SENTINEL):
+            return json.loads(line[len(_NXA_SENTINEL):])
+    raise NxError("resolve driver printed no result line")
+
+
+def score_p2_resolution(
+    members: dict[str, str],
+    resolver: Callable[[list[str]], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """P2: given a CORRECT CUST id, does the ``resolve`` step return the right record?
+
+    Hop 1 is bypassed (gold ids fed directly). Every member id goes to *resolver* in ONE call (the
+    nexus ``resolve_keys`` core). A token is right when it resolved (not in ``missing``/``ambiguous``)
+    and its record names the id and the gold company. P2 passes only at accuracy 1.0 with ``missing``
+    and ``ambiguous`` both empty. Records the call's token count, catalog lookups and wall time.
+    An error from nx raises."""
+    tokens = list(members)
+    if not tokens:
+        return {"accuracy": 0.0, "passed": False, "n_tokens": 0, "hits": 0, "wrong": [],
+                "missing": [], "ambiguous": {}, "resolve_calls": 0}
+    t0 = time.perf_counter()
+    out = (resolver or resolve_p2_tokens)(tokens)
+    wall_s = time.perf_counter() - t0
+    res, texts = out["result"], out.get("texts", {})
+    missing, ambiguous = list(res.get("missing", [])), dict(res.get("ambiguous", {}))
+    resolved = res.get("by_token", {})
+    hits, wrong = 0, []
     for cid, gold_company in members.items():
-        pred = resolve_company(cid)
-        if pred and pred.strip().lower() == gold_company.strip().lower():
+        text = texts.get(cid, "")
+        m = _RE_COMPANY.search(text)
+        pred = m.group(1).strip() if m else None
+        if cid in resolved and cid in text and pred and pred.lower() == gold_company.strip().lower():
             hits += 1
-    return hits / len(members)
+        else:
+            wrong.append(cid)
+    accuracy = hits / len(members)
+    return {
+        "accuracy": accuracy,
+        "passed": accuracy == 1.0 and not missing and not ambiguous,
+        "n_tokens": len(tokens),
+        "n_distinct_tokens": len(set(tokens)),
+        "resolve_calls": 1,
+        "catalog_lookups": out.get("lookups"),
+        "hits": hits,
+        "wrong": wrong,
+        "missing": missing,
+        "ambiguous": ambiguous,
+        "service_url": out.get("service_url"),
+        "resolve_s": out.get("resolve_s"),
+        "wall_s": wall_s,
+    }
+
+
+def score_p2_resolution_accuracy(members: dict[str, str]) -> float:
+    """P2 accuracy through the ``resolve`` step (see ``score_p2_resolution`` for the full record)."""
+    return score_p2_resolution(members)["accuracy"]
+
+
+def p2_rung(detail: dict[str, Any]) -> "Rung":
+    """The P2 scorecard row: GREEN only when ``detail['passed']`` (accuracy 1.0, nothing missing or ambiguous)."""
+    return Rung("P2", "resolution_accuracy_29_members", detail["accuracy"], "==1.0",
+                "GREEN" if detail["passed"] else "RED")
 
 
 def score_p3_detail(q_to_custs: dict[str, list[str]], k: int = 20) -> list[dict[str, Any]]:
@@ -447,7 +579,8 @@ def build(k: int = 20, nx_answer: bool = False, cap_usd: float = DEFAULT_CAP_USD
     versions = service_versions()
 
     p1_recall, p1_prec = score_p1_link_recall_precision(gold["mentions"])
-    p2 = score_p2_resolution_accuracy(gold["members"])
+    p2_detail = score_p2_resolution(gold["members"])
+    p2 = p2_detail["accuracy"]
     p3_rows = score_p3_detail(gold["q_to_custs"], k)
     p3 = sum(r["precision"] for r in p3_rows) / len(p3_rows) if p3_rows else 0.0
 
@@ -483,7 +616,7 @@ def build(k: int = 20, nx_answer: bool = False, cap_usd: float = DEFAULT_CAP_USD
     rungs = [
         Rung("P1", "mentions_link_recall", p1_recall, "==1.0", _status(p1_recall, lambda v: v == 1.0)),
         Rung("P1", "mentions_link_precision", p1_prec, ">=0.95", _status(p1_prec, lambda v: v >= 0.95)),
-        Rung("P2", "resolution_accuracy_29_members", p2, "==1.0", _status(p2, lambda v: v == 1.0)),
+        p2_rung(p2_detail),
         Rung("P3", "hop1_precision", p3, ">=0.80", _status(p3, lambda v: v >= 0.80)),
         Rung("E2E-script", "company_recall_all7", script["all7"]["recall"], "baseline", "BASELINE"),
         Rung("E2E-script", "company_precision_all7", script["all7"]["precision"], "baseline", "BASELINE"),
@@ -509,6 +642,7 @@ def build(k: int = 20, nx_answer: bool = False, cap_usd: float = DEFAULT_CAP_USD
                      "product": PRODUCT, "collection": CORPUS,
                      "sandbox": os.environ.get("HERB_SANDBOX") == "1"},
         "rungs": [asdict(r) for r in rungs],
+        "p2_resolve": p2_detail,
     }
     baselines = {
         "manifest": card["manifest"],
@@ -522,7 +656,7 @@ def build(k: int = 20, nx_answer: bool = False, cap_usd: float = DEFAULT_CAP_USD
                                        "note": "hop 1 = the question's cited artifacts from the HERB source"},
             "oracle_retrieval_k300_filtered_to_cited": {"summary": oracle_retr, "rows": oracle_retr_rows},
         },
-        "p2": {"n_members": len(gold["members"]), "accuracy": p2},
+        "p2": {"n_members": len(gold["members"]), "accuracy": p2, "resolve": p2_detail},
         "p3": {"mean_precision": p3, "by_kind": p3_by_kind(p3_rows), "rows": p3_rows},
     }
     return card, baselines
@@ -552,6 +686,34 @@ def emit_scorecard(k: int = 20, nx_answer: bool = False, cap_usd: float = DEFAUL
     return card
 
 
+def emit_p2_resolve(date: str | None = None) -> dict[str, Any]:
+    """Score ONLY the P2 rung through the ``resolve`` step and record it (no other rung runs).
+
+    Writes ``results/herb/p2-resolve-<date>.json`` and updates the P2 rung and the ``p2_resolve``
+    entry of the existing ``herb-scorecard.json`` in place, so the other rungs and the recorded
+    ``step0-baselines.json`` stay exactly as measured. Spend is 0: no embedding, no model call."""
+    gold = _load_gold()
+    detail = score_p2_resolution(gold["members"])
+    stamp = datetime.now(timezone.utc)
+    date = date or stamp.strftime("%Y-%m-%d")
+    row = {"rdr": "RDR-147", "bead": "nexus-v9v5r", "step": "3", "rung": "P2", "via": "resolve_keys",
+           "timestamp_utc": stamp.isoformat(), "product": PRODUCT, "collection": CORPUS,
+           "sandbox": os.environ.get("HERB_SANDBOX") == "1", "spend_usd": 0.0, **service_versions(),
+           **detail}
+    _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    out = _RESULTS_DIR / f"p2-resolve-{date}.json"
+    out.write_text(json.dumps(row, indent=2))
+    card = json.loads(_SCORECARD.read_text())
+    rung = asdict(p2_rung(detail))
+    card["rungs"] = [rung if r["phase"] == "P2" else r for r in card["rungs"]]
+    card["p2_resolve"] = {**detail, "timestamp_utc": row["timestamp_utc"], "file": out.name}
+    _SCORECARD.write_text(json.dumps(card, indent=2))
+    console.print(f"P2 via resolve: accuracy {detail['accuracy']:.3f} ({detail['hits']}/{detail['n_tokens']}), "
+                  f"missing {detail['missing']}, ambiguous {detail['ambiguous']}, {rung['status']}\n"
+                  f"written: {out}\nscorecard updated: {_SCORECARD}")
+    return row
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="RDR-147 HERB benchmark ladder")
     ap.add_argument("--build-gold", action="store_true", help="rebuild gold fixtures and exit")
@@ -559,10 +721,16 @@ def main() -> None:
     ap.add_argument("--nx-answer", action="store_true",
                     help="also run the nx_answer product rung (spends money; needs the claude CLI)")
     ap.add_argument("--cap-usd", type=float, default=DEFAULT_CAP_USD, help="hard cap on total nx_answer spend")
+    ap.add_argument("--p2-resolve", action="store_true",
+                    help="score only the P2 rung through the resolve step; write results/herb/p2-resolve-<date>.json "
+                         "and update the P2 row of herb-scorecard.json (spend 0)")
     ap.add_argument("--label", default="run", help="name of this run in the nx_answer cost ledger")
     args = ap.parse_args()
     if args.build_gold:
         build_gold_fixtures()
+        return
+    if args.p2_resolve:
+        emit_p2_resolve()
         return
     emit_scorecard(k=args.k, nx_answer=args.nx_answer, cap_usd=args.cap_usd, label=args.label)
 

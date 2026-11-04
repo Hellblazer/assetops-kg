@@ -86,5 +86,22 @@
       "target": ">=script F1 (issue5)",
       "status": "RED"
     }
-  ]
+  ],
+  "p2_resolve": {
+    "accuracy": 1.0,
+    "passed": true,
+    "n_tokens": 29,
+    "n_distinct_tokens": 29,
+    "resolve_calls": 1,
+    "catalog_lookups": 29,
+    "hits": 29,
+    "wrong": [],
+    "missing": [],
+    "ambiguous": {},
+    "service_url": "http://127.0.0.1:62834",
+    "resolve_s": 0.038299999898299575,
+    "wall_s": 0.8452872920315713,
+    "timestamp_utc": "2026-11-04T03:07:00.551936+00:00",
+    "file": "p2-resolve-2026-11-04.json"
+  }
 }
