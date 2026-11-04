@@ -44,6 +44,10 @@ $SB destroy                                              # down, then remove .he
 The harness python must have `rich` (and `pytest` for tests); the sandbox puts the caller's
 `python3` first on PATH. `nx` is the installed one; `NX_BIN` overrides.
 
+- P2 needs a nexus with `nexus.plans.resolve_step` (nexus `develop` until it ships in a release).
+- `HERB_NEXUS_REV=<sha> NX_PYTHON=<venv>/bin/python3 NX_BIN=<venv>/bin/nx $SB run python3 -m benchmark.herb_ladder --p2-resolve` scores only P2 (spend 0), writes `results/herb/p2-resolve-<date>.json`, and patches only the P2 rung, `p2_resolve` and `manifest.patched_rungs.P2` of the scorecard (never `step0-baselines.json`).
+- P2 refuses the installed nexus interpreter and any env whose `HOME`/`NEXUS_CONFIG_DIR` is not under `.herb-sandbox`: set `NX_PYTHON`/`NX_BIN` to a venv with the nexus under test, and `HERB_NEXUS_REV` to its git revision (recorded beside the wheel version).
+
 ## What the ladder measures
 
 | Rung | Metric | Graded against |

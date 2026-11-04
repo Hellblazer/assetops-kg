@@ -33,8 +33,10 @@ Run inside the isolated sandbox (see herb_sandbox.sh):
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import os
+import pwd
 import re
 import subprocess
 import textwrap
@@ -42,7 +44,7 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from rich.console import Console
 
@@ -274,12 +276,61 @@ def score_p1_link_recall_precision(
 
 # The P2 rung resolves the member customers through nexus's `resolve` step (RDR-147 Step 3,
 # nexus-v9v5r): ONE `resolve_keys` call over every token, in the conexus interpreter, then one
-# batched `store_get_many` for the resolved records' text. The driver refuses a non-loopback
-# service URL before any request, so a stray ambient config cannot send it to a live tenant.
+# batched `store_get_many` for the resolved records' text. It needs a nexus that has
+# `nexus.plans.resolve_step` (nexus develop until it ships in a release).
+#
+# Two guards keep it off a live tenant. `p2_sandbox_violations` runs in the host before any spawn and
+# again in the driver from the driver's own environment, before any client exists; the driver then
+# refuses a non-loopback service URL before any request.
+
+
+def p2_sandbox_violations(env: Mapping[str, str], interpreter: Any, real_home: Any) -> list[str]:
+    """Reasons P2 must not reach a nexus service from *env* with *interpreter*; empty means it may.
+
+    Stdlib only and self-contained: the driver embeds this function's source and runs it itself.
+    HERB_SANDBOX=1 alone is not enough (it can be exported by hand): NEXUS_CONFIG_DIR and HOME must
+    both lie under a ``.herb-sandbox`` directory (symlinks and ``..`` resolved), the interpreter must
+    not be the one installed under *real_home*'s nexus tools directory (it would read the operator's
+    own service config), and HERB_NEXUS_REV must name the nexus revision being measured."""
+    import os
+    import re
+
+    bad: list[str] = []
+    if env.get("HERB_SANDBOX") != "1":
+        bad.append("HERB_SANDBOX is not 1")
+    for key in ("NEXUS_CONFIG_DIR", "HOME"):
+        val = env.get(key)
+        if not val:
+            bad.append(f"{key} is not set")
+        elif ".herb-sandbox" not in os.path.realpath(val).split(os.sep):
+            bad.append(f"{key}={val} does not lie under a .herb-sandbox directory")
+    tools = os.path.realpath(os.path.join(str(real_home), ".local", "share", "nexus", "tools"))
+    interp_dir = os.path.realpath(os.path.dirname(os.path.abspath(str(interpreter))))
+    if interp_dir == tools or interp_dir.startswith(tools + os.sep):
+        bad.append(f"interpreter {interpreter} is the installed nexus ({tools}); set NX_PYTHON to a sandbox venv")
+    if not re.fullmatch(r"[0-9a-f]{7,40}", env.get("HERB_NEXUS_REV", "")):
+        bad.append("HERB_NEXUS_REV is not set to the nexus git revision under test (hex, 7-40 chars)")
+    return bad
+
+
+def _real_home() -> str:
+    """The operator's home from the password database, not from $HOME (which the sandbox swaps)."""
+    return pwd.getpwuid(os.getuid()).pw_dir
+
+
 _RESOLVE_DRIVER = textwrap.dedent(
     """
-    import json, sys, time
+    from __future__ import annotations
+    import json, os, pwd, sys, time
     from urllib.parse import urlparse
+
+    @@GUARD@@
+
+    bad = p2_sandbox_violations(os.environ, sys.executable, pwd.getpwuid(os.getuid()).pw_dir)
+    if bad:
+        raise SystemExit("resolve driver refuses to run: " + "; ".join(bad))
+
+    import importlib.metadata
     from nexus.catalog.http_catalog_client import HttpCatalogClient
     from nexus.mcp.core import store_get_many
     from nexus.plans.resolve_step import resolve_keys
@@ -293,6 +344,12 @@ _RESOLVE_DRIVER = textwrap.dedent(
         def get_manifests(self, *a, **kw):
             return self.inner.get_manifests(*a, **kw)
 
+    resolve_invocations = []
+
+    def counted_resolve_keys(catalog, tokens):
+        resolve_invocations.append(len(tokens))
+        return resolve_keys(catalog, tokens)
+
     tokens = json.load(open(sys.argv[1]))
     cat = HttpCatalogClient()
     url = str(cat._base_url)
@@ -301,36 +358,43 @@ _RESOLVE_DRIVER = textwrap.dedent(
         raise SystemExit("refusing non-loopback service url " + url)
     spy = Spy(cat)
     t0 = time.perf_counter()
-    res = resolve_keys(spy, tokens)
+    res = counted_resolve_keys(spy, tokens)
     resolve_s = time.perf_counter() - t0
     flat_ids, flat_colls, owner = [], [], []
     for tok, bt in res["by_token"].items():
         for i, c in zip(bt["ids"], bt["collections"]):
             flat_ids.append(i); flat_colls.append(c); owner.append(tok)
-    texts = {{tok: "" for tok in res["by_token"]}}
+    texts = {tok: "" for tok in res["by_token"]}
     if flat_ids:
         got = store_get_many(flat_ids, flat_colls, max_chars_per_doc=100000, structured=True)
         for tok, body in zip(owner, got["contents"]):
             texts[tok] += (body or "") + "\\n"
-    print("{sentinel}" + json.dumps({{
+    print("@@SENTINEL@@" + json.dumps({
         "service_url": url, "result": res, "texts": texts,
-        "lookups": spy.lookups, "resolve_s": resolve_s,
-    }}))
+        "lookups": spy.lookups, "resolve_calls": len(resolve_invocations), "resolve_s": resolve_s,
+        "nexus_revision": os.environ["HERB_NEXUS_REV"],
+        "nexus_dist_version": importlib.metadata.version("conexus"),
+    }))
     """
-).format(sentinel=_NXA_SENTINEL)
+).replace("@@GUARD@@", textwrap.dedent(inspect.getsource(p2_sandbox_violations))).replace("@@SENTINEL@@", _NXA_SENTINEL)
 
 
 def resolve_p2_tokens(tokens: list[str]) -> dict[str, Any]:
     """ONE ``resolve_keys`` call over *tokens* against the sandbox catalog, via the conexus interpreter.
 
-    Returns ``{service_url, result, texts, lookups, resolve_s}``: ``result`` is the step's own output
-    (``tumblers, ids, collections, by_token, missing, ambiguous``), ``texts`` the joined chunk text of
-    each resolved token's record. Raises ``NxError`` on a subprocess failure or a missing result line."""
+    Refuses (``NxError``) before spawning anything unless ``p2_sandbox_violations`` is empty.
+    Returns ``{service_url, result, texts, lookups, resolve_calls, resolve_s, nexus_revision,
+    nexus_dist_version}``: ``result`` is the step's own output (``tumblers, ids, collections, by_token,
+    missing, ambiguous``), ``texts`` the joined chunk text of each resolved token's record,
+    ``resolve_calls`` the number of ``resolve_keys`` invocations the driver counted. Raises ``NxError``
+    on a subprocess failure or a missing result line."""
     import tempfile
 
-    if os.environ.get("HERB_SANDBOX") != "1":
-        raise NxError("resolve_p2_tokens reaches a nexus service: run it through benchmark/herb_sandbox.sh "
-                      "(HERB_SANDBOX=1), never against the operator's own or the managed service")
+    bad = p2_sandbox_violations(os.environ, CONEXUS_PYTHON, _real_home())
+    if bad:
+        raise NxError("resolve_p2_tokens refuses to reach a nexus service: " + "; ".join(bad)
+                      + ". Run it through benchmark/herb_sandbox.sh with NX_PYTHON/NX_BIN set to a sandbox "
+                        "venv and HERB_NEXUS_REV set; never against the operator's own or the managed service")
     if not CONEXUS_PYTHON.exists():
         raise NxError(f"nx interpreter not found at {CONEXUS_PYTHON}; set NX_PYTHON")
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tf:
@@ -360,14 +424,18 @@ def score_p2_resolution(
     """P2: given a CORRECT CUST id, does the ``resolve`` step return the right record?
 
     Hop 1 is bypassed (gold ids fed directly). Every member id goes to *resolver* in ONE call (the
-    nexus ``resolve_keys`` core). A token is right when it resolved (not in ``missing``/``ambiguous``)
-    and its record names the id and the gold company. P2 passes only at accuracy 1.0 with ``missing``
-    and ``ambiguous`` both empty. Records the call's token count, catalog lookups and wall time.
-    An error from nx raises."""
+    nexus ``resolve_keys`` core). A token is right when it resolved (a ``by_token`` entry, not in
+    ``missing``/``ambiguous``) and its record text opens with ``Customer {cid}:`` and names the gold
+    company. That correctness check is HERB-scoped: it checks the ingest format of
+    ``run_herb.flatten_artifacts`` (``Customer {cid}: contact ..., at company {company}.``), not a
+    general resolve contract. P2 passes only at accuracy 1.0 with ``missing`` and ``ambiguous`` both
+    empty. Records the token count, the driver-counted resolve calls, catalog lookups, wall time and
+    the nexus revision and wheel version the driver ran. An error from nx raises."""
     tokens = list(members)
     if not tokens:
         return {"accuracy": 0.0, "passed": False, "n_tokens": 0, "hits": 0, "wrong": [],
-                "missing": [], "ambiguous": {}, "resolve_calls": 0}
+                "missing": [], "ambiguous": {}, "resolve_calls": 0,
+                "nexus_revision": None, "nexus_dist_version": None}
     t0 = time.perf_counter()
     out = (resolver or resolve_p2_tokens)(tokens)
     wall_s = time.perf_counter() - t0
@@ -377,9 +445,10 @@ def score_p2_resolution(
     hits, wrong = 0, []
     for cid, gold_company in members.items():
         text = texts.get(cid, "")
+        own_record = re.search(rf"(?m)^\s*Customer {re.escape(cid)}:", text)
         m = _RE_COMPANY.search(text)
         pred = m.group(1).strip() if m else None
-        if cid in resolved and cid in text and pred and pred.lower() == gold_company.strip().lower():
+        if cid in resolved and own_record and pred and pred.lower() == gold_company.strip().lower():
             hits += 1
         else:
             wrong.append(cid)
@@ -389,7 +458,7 @@ def score_p2_resolution(
         "passed": accuracy == 1.0 and not missing and not ambiguous,
         "n_tokens": len(tokens),
         "n_distinct_tokens": len(set(tokens)),
-        "resolve_calls": 1,
+        "resolve_calls": out["resolve_calls"],
         "catalog_lookups": out.get("lookups"),
         "hits": hits,
         "wrong": wrong,
@@ -398,6 +467,8 @@ def score_p2_resolution(
         "service_url": out.get("service_url"),
         "resolve_s": out.get("resolve_s"),
         "wall_s": wall_s,
+        "nexus_revision": out["nexus_revision"],
+        "nexus_dist_version": out["nexus_dist_version"],
     }
 
 
@@ -408,8 +479,36 @@ def score_p2_resolution_accuracy(members: dict[str, str]) -> float:
 
 def p2_rung(detail: dict[str, Any]) -> "Rung":
     """The P2 scorecard row: GREEN only when ``detail['passed']`` (accuracy 1.0, nothing missing or ambiguous)."""
-    return Rung("P2", "resolution_accuracy_29_members", detail["accuracy"], "==1.0",
+    return Rung("P2", "resolution_accuracy_29_members", detail["accuracy"], "==1.0, missing=[] ambiguous={}",
                 "GREEN" if detail["passed"] else "RED")
+
+
+def p2_resolve_entry(detail: dict[str, Any], versions: dict[str, str], timestamp_utc: str,
+                     file: str | None) -> dict[str, Any]:
+    """The scorecard's ``p2_resolve`` entry: the same shape on the full run (``file`` None, no per-run
+    file is written) and on ``--p2-resolve``. Carries the nx/engine versions and the nexus revision."""
+    return {**detail, **versions, "timestamp_utc": timestamp_utc, "file": file}
+
+
+def patch_scorecard_p2(card: dict[str, Any], detail: dict[str, Any], versions: dict[str, str],
+                       timestamp_utc: str, file: str) -> dict[str, Any]:
+    """Replace the P2 rung and ``p2_resolve`` of *card* in place and mark the manifest.
+
+    Raises ``ValueError`` unless the card holds exactly one P2 rung. The card's own manifest versions
+    describe the other rungs and stay as measured; ``manifest.patched_rungs.P2`` names what was
+    replaced and the versions and nexus revision it was measured on."""
+    idx = [i for i, r in enumerate(card["rungs"]) if r["phase"] == "P2"]
+    if len(idx) != 1:
+        raise ValueError(f"expected exactly one P2 rung in the scorecard, found {len(idx)}")
+    rung = p2_rung(detail)
+    card["rungs"][idx[0]] = asdict(rung)
+    card["p2_resolve"] = p2_resolve_entry(detail, versions, timestamp_utc, file)
+    card["manifest"].setdefault("patched_rungs", {})["P2"] = {
+        "metric": rung.metric, "by": "--p2-resolve", "file": file, "timestamp_utc": timestamp_utc,
+        "nexus_revision": detail["nexus_revision"], "nexus_dist_version": detail["nexus_dist_version"],
+        "nx_version": versions.get("nx_version"), "engine_release_version": versions.get("engine_release_version"),
+    }
+    return card
 
 
 def score_p3_detail(q_to_custs: dict[str, list[str]], k: int = 20) -> list[dict[str, Any]]:
@@ -633,16 +732,17 @@ def build(k: int = 20, nx_answer: bool = False, cap_usd: float = DEFAULT_CAP_USD
     else:
         rungs.append(Rung("E2E-nx_answer", "company_f1_issue5", None, ">=script F1 (issue5)", "RED"))
 
+    stamp = datetime.now(timezone.utc).isoformat()
     card = {
         "rdr": "RDR-147",
         "step": "0",
         "baseline_e2e_company_recall_june": _E2E_BASELINE,
         "k": k,
-        "manifest": {"timestamp_utc": datetime.now(timezone.utc).isoformat(), **versions,
+        "manifest": {"timestamp_utc": stamp, **versions,
                      "product": PRODUCT, "collection": CORPUS,
                      "sandbox": os.environ.get("HERB_SANDBOX") == "1"},
         "rungs": [asdict(r) for r in rungs],
-        "p2_resolve": p2_detail,
+        "p2_resolve": p2_resolve_entry(p2_detail, versions, stamp, None),
     }
     baselines = {
         "manifest": card["manifest"],
@@ -686,30 +786,31 @@ def emit_scorecard(k: int = 20, nx_answer: bool = False, cap_usd: float = DEFAUL
     return card
 
 
-def emit_p2_resolve(date: str | None = None) -> dict[str, Any]:
+def emit_p2_resolve(date: str | None = None,
+                    resolver: Callable[[list[str]], dict[str, Any]] | None = None) -> dict[str, Any]:
     """Score ONLY the P2 rung through the ``resolve`` step and record it (no other rung runs).
 
-    Writes ``results/herb/p2-resolve-<date>.json`` and updates the P2 rung and the ``p2_resolve``
-    entry of the existing ``herb-scorecard.json`` in place, so the other rungs and the recorded
-    ``step0-baselines.json`` stay exactly as measured. Spend is 0: no embedding, no model call."""
+    Writes ``results/herb/p2-resolve-<date>.json`` and patches the P2 rung, ``p2_resolve`` and
+    ``manifest.patched_rungs.P2`` of the existing ``herb-scorecard.json`` (``patch_scorecard_p2``:
+    exactly one P2 rung must exist). ``step0-baselines.json`` is not touched: it stays exactly as the
+    full run measured it. Spend is 0: no embedding, no model call."""
     gold = _load_gold()
-    detail = score_p2_resolution(gold["members"])
+    detail = score_p2_resolution(gold["members"], resolver)
+    versions = service_versions()
     stamp = datetime.now(timezone.utc)
     date = date or stamp.strftime("%Y-%m-%d")
     row = {"rdr": "RDR-147", "bead": "nexus-v9v5r", "step": "3", "rung": "P2", "via": "resolve_keys",
            "timestamp_utc": stamp.isoformat(), "product": PRODUCT, "collection": CORPUS,
-           "sandbox": os.environ.get("HERB_SANDBOX") == "1", "spend_usd": 0.0, **service_versions(),
-           **detail}
+           "sandbox": os.environ.get("HERB_SANDBOX") == "1", "spend_usd": 0.0, **versions, **detail}
     _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out = _RESULTS_DIR / f"p2-resolve-{date}.json"
     out.write_text(json.dumps(row, indent=2))
-    card = json.loads(_SCORECARD.read_text())
-    rung = asdict(p2_rung(detail))
-    card["rungs"] = [rung if r["phase"] == "P2" else r for r in card["rungs"]]
-    card["p2_resolve"] = {**detail, "timestamp_utc": row["timestamp_utc"], "file": out.name}
+    card = patch_scorecard_p2(json.loads(_SCORECARD.read_text()), detail, versions, row["timestamp_utc"], out.name)
     _SCORECARD.write_text(json.dumps(card, indent=2))
+    status = next(r["status"] for r in card["rungs"] if r["phase"] == "P2")
     console.print(f"P2 via resolve: accuracy {detail['accuracy']:.3f} ({detail['hits']}/{detail['n_tokens']}), "
-                  f"missing {detail['missing']}, ambiguous {detail['ambiguous']}, {rung['status']}\n"
+                  f"missing {detail['missing']}, ambiguous {detail['ambiguous']}, {status}\n"
+                  f"nexus {detail['nexus_revision']} (wheel {detail['nexus_dist_version']})\n"
                   f"written: {out}\nscorecard updated: {_SCORECARD}")
     return row
 

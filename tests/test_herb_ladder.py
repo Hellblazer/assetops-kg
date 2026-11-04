@@ -121,86 +121,8 @@ def test_p1_mentions_link_recall_is_total(gold):
 
 # --- P2: the `resolve` step over the 29 members (RDR-147 Step 3, nexus-v9v5r) ---
 #
-# The first group runs on a fake resolver (no sandbox, no engine); it pins how the harness CALLS
-# nexus's resolve_keys and reads its answer. The last test is the live one.
-
-
-class _FakeResolver:
-    """Stands in for the resolve_keys driver: records every call, answers from the gold members."""
-
-    def __init__(self, members, *, missing=(), ambiguous=None, company_for=None):
-        self.members, self.calls = members, []
-        self.missing, self.ambiguous = list(missing), dict(ambiguous or {})
-        self.company_for = company_for or {}
-
-    def __call__(self, tokens):
-        self.calls.append(list(tokens))
-        by_token = {t: {"tumbler": f"1.1.{i}", "ids": [f"h{i}"], "collections": ["knowledge__herb-searchflow"]}
-                    for i, t in enumerate(tokens, 1)}
-        texts = {t: f"Customer {t}: contact N, R at company {self.company_for.get(t, self.members[t])}."
-                 for t in tokens}
-        return {
-            "service_url": "http://127.0.0.1:1", "lookups": len(set(tokens)), "resolve_s": 0.0,
-            "texts": texts,
-            "result": {"by_token": by_token, "missing": self.missing, "ambiguous": self.ambiguous,
-                       "tumblers": [], "ids": [], "collections": []},
-        }
-
-
-@pytest.fixture(scope="module")
-def members():
-    return json.loads((Path(herb.__file__).parent / "fixtures" / "herb" / "p2_member_customers.json").read_text())
-
-
-def test_p2_sends_all_29_tokens_in_one_call(members):
-    fake = _FakeResolver(members)
-    detail = herb.score_p2_resolution(members, resolver=fake)
-    assert len(members) == 29
-    assert fake.calls == [list(members)]  # one call, every token, in fixture order
-    assert detail["n_tokens"] == 29 and detail["resolve_calls"] == 1
-    assert detail["accuracy"] == 1.0 and detail["passed"] is True
-    assert herb.p2_rung(detail).status == "GREEN"
-
-
-def test_p2_reports_missing_and_ambiguous_from_the_result(members):
-    gone, twice = "CUST-0018", "CUST-0027"
-    fake = _FakeResolver(members, missing=[gone], ambiguous={twice: ["1.1.5", "1.2.9"]})
-    detail = herb.score_p2_resolution(members, resolver=fake)
-    assert detail["missing"] == [gone]
-    assert detail["ambiguous"] == {twice: ["1.1.5", "1.2.9"]}
-
-
-@pytest.mark.parametrize("kw", [{"missing": ["CUST-0018"]}, {"ambiguous": {"CUST-0018": ["1.1.1", "1.2.1"]}}])
-def test_p2_fails_when_missing_or_ambiguous_is_non_empty(members, kw):
-    # Every token still reads as right in by_token/texts, so only the two lists can fail the rung.
-    detail = herb.score_p2_resolution(members, resolver=_FakeResolver(members, **kw))
-    assert detail["accuracy"] == 1.0
-    assert detail["passed"] is False
-    assert herb.p2_rung(detail).status == "RED"
-
-
-def test_p2_a_record_naming_another_company_is_wrong(members):
-    cid = "CUST-0018"
-    other = "NotTheCompany"
-    assert members[cid] != other
-    detail = herb.score_p2_resolution(members, resolver=_FakeResolver(members, company_for={cid: other}))
-    assert detail["wrong"] == [cid]
-    assert detail["accuracy"] == 28 / 29
-    assert detail["passed"] is False
-
-
-def test_p2_accuracy_wrapper_goes_through_the_resolve_call(members, monkeypatch):
-    fake = _FakeResolver(members)
-    monkeypatch.setattr(herb, "resolve_p2_tokens", fake)
-    monkeypatch.setattr(herb, "resolve_company", lambda cid: pytest.fail("P2 must not use the per-token lookup"))
-    assert herb.score_p2_resolution_accuracy(members) == 1.0
-    assert len(fake.calls) == 1
-
-
-def test_p2_resolve_driver_refuses_to_run_outside_the_sandbox(members, monkeypatch):
-    monkeypatch.delenv("HERB_SANDBOX", raising=False)
-    with pytest.raises(herb.NxError, match="herb_sandbox.sh"):
-        herb.resolve_p2_tokens(list(members))
+# Only the live test is here; the fake-resolver pins, the sandbox guard and the driver tests are
+# unit tests of the harness, in tests/test_herb_harness.py (unmarked, no sandbox, no nx).
 
 
 def test_p2_resolution_accuracy_is_total(gold):
@@ -210,6 +132,7 @@ def test_p2_resolution_accuracy_is_total(gold):
     assert detail["missing"] == [] and detail["ambiguous"] == {}
     assert detail["passed"] is True
     assert detail["n_tokens"] == 29 and detail["resolve_calls"] == 1
+    assert detail["nexus_revision"] and detail["nexus_dist_version"]
 
 
 # --- P3: hop-1 precision (RED until a precision step exists) ---
