@@ -684,3 +684,865 @@ def test_full_build_gives_p2_resolve_the_same_shape(members, monkeypatch):
         herb_ladder.score_p2_resolution(members, resolver=_FakeResolver(members)), _VERSIONS, "t", "f")
     assert set(card["p2_resolve"]) == set(row)
     assert card["p2_resolve"]["nexus_revision"] == REV and card["p2_resolve"]["file"] is None
+
+
+# =========================================================================== #
+# RDR-147 MVV harness (nexus-bwct4.1): fixture rows and fakes only. No test here starts a sandbox,
+# spawns an interpreter, calls a model or reaches a service: the nx_answer call and the plan library
+# are fakes, and the two drivers run in-process against stub nexus modules.
+# =========================================================================== #
+
+REGISTRY = {"CUST-0001": "Acme", "CUST-1": "Acme", "CUST-2": "Beta", "CUST-3": "Gamma", "CUST-4": "Delta", "CUST-5": "Eps"}
+UNIVERSE = sorted(set(REGISTRY.values()))
+
+
+@pytest.fixture(autouse=True)
+def _no_live_company_lookup(monkeypatch):
+    """companies_for_ids runs `nx search` per id; a unit test answers from the fixture registry instead."""
+    monkeypatch.setattr(herb_ladder, "companies_for_ids", lambda ids: {REGISTRY[i] for i in ids if i in REGISTRY})
+
+
+def _qrow(i=1, *, kind="issue", named=("Acme",), gold=("Acme",), anchors=("CUST-1",), entered=True,
+          valid=True, plan_id=None, evidence=(), label="a"):
+    """One nx_answer row as run_nx_answer_rows writes it, built from fixture values."""
+    return {"question": f"q{i}", "kind": kind, "gold": list(gold), "pred": sorted(named),
+            **herb_ladder.score_set(set(named), set(gold)),
+            "run_label": label, "plan_id": plan_id, "valid": valid,
+            "invalid_reason": "" if valid else "run on grown plan 14",
+            "resolution_entered": entered, "anchor_key_ids": list(anchors), "resolved": [], "missing": [],
+            "ambiguous": [], "joined_dropped": 0, "evidence_cust_ids": list(evidence)}
+
+
+def _issue_rows(**over):
+    """Five issue questions that all pass: anchors CUST-1 -> Acme, named Acme."""
+    return [_qrow(i, **over) for i in range(1, 6)]
+
+
+# --- the RepairReport columns, read tolerantly ---
+
+
+def test_repair_columns_copy_the_report_fields():
+    rep = {"resolution_entered": True, "anchor_key_ids": ["CUST-1", "CUST-2"], "resolved": ["CUST-1"],
+           "missing": ["CUST-2"], "ambiguous": [], "joined_dropped": 2, "outcome": "completed"}
+    cols = herb_ladder.repair_columns(rep)
+    assert cols == {"resolution_entered": True, "anchor_key_ids": ["CUST-1", "CUST-2"], "resolved": ["CUST-1"],
+                    "missing": ["CUST-2"], "ambiguous": [], "joined_dropped": 2}
+
+
+@pytest.mark.parametrize("rep", [None, {}, {"outcome": "completed"}, "not a mapping", [], 7])
+def test_repair_columns_degrade_to_not_entered(rep):
+    cols = herb_ladder.repair_columns(rep)
+    assert cols["resolution_entered"] is False
+    assert cols["anchor_key_ids"] == [] and cols["resolved"] == [] and cols["missing"] == []
+    assert cols["ambiguous"] == [] and cols["joined_dropped"] == 0
+    assert set(cols) == set(herb_ladder.REPAIR_FIELDS)
+
+
+@pytest.mark.parametrize("flag", ["yes", 1, "true", None])
+def test_only_a_true_boolean_counts_as_entered(flag):
+    assert herb_ladder.repair_columns({"resolution_entered": flag})["resolution_entered"] is False
+
+
+def test_repair_columns_turn_null_lists_into_empty_ones():
+    cols = herb_ladder.repair_columns({"anchor_key_ids": None, "missing": None, "joined_dropped": None})
+    assert cols["anchor_key_ids"] == [] and cols["missing"] == [] and cols["joined_dropped"] == 0
+
+
+# --- join completeness: gated, over anchor_key_ids ---
+
+
+def _jc(rows):
+    return herb_ladder.join_completeness(rows, REGISTRY)
+
+
+def test_completeness_passes_when_named_companies_are_a_superset():
+    rows = [_qrow(1, named=("Acme", "Beta", "Gamma"), anchors=("CUST-1", "CUST-2")), *_issue_rows()[1:]]
+    out = _jc(rows)
+    assert out["questions"][0]["complete"] is True and out["questions"][0]["passed"] is True
+    assert out["passed"] is True and out["in_domain"] == 5
+
+
+def test_completeness_fails_when_one_anchor_company_is_not_named():
+    rows = [_qrow(1, named=("Acme",), anchors=("CUST-1", "CUST-2")), *_issue_rows()[1:]]
+    out = _jc(rows)
+    q = out["questions"][0]
+    assert q["complete"] is False and q["missing_companies"] == ["Beta"]
+    assert out["passed"] is False
+
+
+def test_a_question_with_no_anchor_ids_is_outside_the_domain():
+    rows = [_qrow(1, named=(), anchors=()), *_issue_rows()[1:]]   # names nothing, would fail if in domain
+    out = _jc(rows)
+    assert out["questions"][0]["in_domain"] is False
+    assert out["in_domain"] == 4 and out["vacuous"] is False and out["passed"] is True
+
+
+def test_three_of_five_in_the_domain_fails_as_vacuous():
+    rows = [_qrow(1, anchors=()), _qrow(2, anchors=()), *_issue_rows()[2:]]
+    out = _jc(rows)
+    assert out["in_domain"] == 3 and out["vacuous"] is True
+    assert out["passed"] is False and "vacuous" in out["reason"]
+
+
+def test_four_of_five_in_the_domain_is_the_floor():
+    out = _jc([_qrow(1, anchors=()), *_issue_rows()[1:]])
+    assert out["in_domain"] == 4 and herb_ladder.DOMAIN_FLOOR == 4 and out["passed"] is True
+
+
+def test_aggregation_rows_are_not_in_the_domain():
+    agg = [_qrow(6, kind="aggregation", anchors=("CUST-1",)), _qrow(7, kind="aggregation", anchors=("CUST-1",))]
+    out = _jc(_issue_rows() + agg)
+    assert out["in_domain"] == 5 and len(out["questions"]) == 5
+
+
+def test_a_question_passes_only_where_resolution_entered():
+    rows = [_qrow(1, entered=False), *_issue_rows()[1:]]
+    out = _jc(rows)
+    q = out["questions"][0]
+    assert q["complete"] is True and q["passed"] is False and "resolution" in q["reason"]
+    assert out["passed"] is False
+
+
+def test_an_invalid_row_is_outside_the_domain_and_fails_the_set():
+    rows = [_qrow(1, valid=False), *_issue_rows()[1:]]
+    out = _jc(rows)
+    assert out["questions"][0]["in_domain"] is False and out["in_domain"] == 4
+    assert out["passed"] is False and out["n_invalid"] == 1   # four in the domain is not a pass: a row is missing
+
+
+def test_anchor_ids_the_registry_cannot_map_do_not_pass_vacuously():
+    out = _jc([_qrow(1, anchors=("CUST-999",)), *_issue_rows()[1:]])
+    q = out["questions"][0]
+    assert q["in_domain"] is True and q["anchor_companies"] == [] and q["passed"] is False
+    assert out["passed"] is False
+
+
+def test_fewer_than_five_issue_rows_fails_the_set():
+    out = _jc(_issue_rows()[:4])
+    assert out["n_issue"] == 4 and out["passed"] is False
+
+
+def test_a_skipped_row_counts_as_not_run():
+    rows = [{"question": "q1", "kind": "issue", "skipped": "cost cap reached", **herb_ladder.score_set(set(), {"Acme"})},
+            *_issue_rows()[1:]]
+    out = _jc(rows)
+    assert out["questions"][0]["in_domain"] is False and out["passed"] is False
+
+
+def test_evidence_completeness_is_reported_and_not_gated():
+    rows = [_qrow(1, named=("Acme",), evidence=("CUST-1", "CUST-2")), *_issue_rows()[1:]]
+    out = _jc(rows)
+    ev = out["evidence_completeness"]
+    assert ev["questions"][0]["missing_companies"] == ["Beta"] and ev["questions"][0]["complete"] is False
+    assert ev["n_complete"] == 4 and ev["n"] == 5
+    assert out["passed"] is True   # the anchors were all named: the evidence shortfall does not gate
+
+
+# --- precision: per-run mean of per-question precision >= 0.95 in both runs ---
+
+
+def _prec_rows(values, label="a"):
+    """Issue rows whose per-question precision is *values* (a precision p = 1/n_pred, so give a pred set)."""
+    rows = []
+    for i, (hit, n_pred) in enumerate(values, 1):
+        named = {f"N{j}" for j in range(n_pred)}
+        gold = {f"N{j}" for j in range(hit)}
+        rows.append(_qrow(i, named=named, gold=gold or {"X"}, label=label))
+    return rows
+
+
+def test_precision_mean_of_five_passes_at_0_9667():
+    out = herb_ladder.precision_gate(_prec_rows([(5, 6), (1, 1), (1, 1), (1, 1), (1, 1)]))
+    assert out["mean"] == pytest.approx(0.9666666666666667) and out["passed"] is True
+
+
+def test_precision_mean_fails_at_0_9267():
+    out = herb_ladder.precision_gate(_prec_rows([(5, 6), (4, 5), (1, 1), (1, 1), (1, 1)]))
+    assert out["mean"] == pytest.approx(0.9266666666666667) and out["passed"] is False
+
+
+def test_precision_is_the_mean_of_questions_not_the_pooled_ratio():
+    # four questions of 1/1 and one of 9/20: mean 0.89 (fail); pooled 13/24 would differ
+    rows = _prec_rows([(1, 1), (1, 1), (1, 1), (1, 1), (9, 20)])
+    out = herb_ladder.precision_gate(rows)
+    assert out["mean"] == pytest.approx((4 + 0.45) / 5) and out["passed"] is False
+    assert out["pooled"] == pytest.approx(13 / 24)
+    assert [round(p, 3) for p in out["per_question"]] == [1.0, 1.0, 1.0, 1.0, 0.45]
+
+
+def test_precision_gate_is_exactly_at_the_threshold_inclusive():
+    out = herb_ladder.precision_gate(_prec_rows([(19, 20), (1, 1), (1, 1), (1, 1), (1, 1)]))   # mean 0.99
+    assert out["passed"] is True and herb_ladder.PRECISION_GATE == 0.95
+    low = herb_ladder.precision_gate(_prec_rows([(1, 2), (1, 1), (1, 1), (1, 1), (4, 5)]))
+    assert low["passed"] is False
+
+
+def test_precision_gate_needs_five_valid_issue_rows():
+    rows = _prec_rows([(1, 1)] * 5)
+    rows[0]["valid"] = False
+    out = herb_ladder.precision_gate(rows)
+    assert out["n_valid"] == 4 and out["mean"] == 1.0 and out["passed"] is False
+
+
+def test_precision_gate_ignores_aggregation_rows():
+    rows = _prec_rows([(1, 1)] * 5) + [_qrow(6, kind="aggregation", named={"A", "B", "C"}, gold={"A"})]
+    assert herb_ladder.precision_gate(rows)["passed"] is True
+
+
+# --- the two-run MVV score ---
+
+
+def _mvv(a=None, b=None, heldout=()):
+    runs = {}
+    if a is not None:
+        runs["a"] = a
+    if b is not None:
+        runs["b"] = b
+    return herb_ladder.score_mvv(runs, REGISTRY, list(heldout))
+
+
+def test_mvv_passes_when_both_runs_pass_both_gates():
+    out = _mvv(_issue_rows(label="a"), _issue_rows(label="b"))
+    assert out["join_completeness_passed"] is True and out["precision_passed"] is True and out["passed"] is True
+    assert out["runs"]["a"]["issue_entered"] == 5 and out["runs"]["b"]["issue_entered"] == 5
+
+
+def test_mvv_fails_when_only_one_run_clears_precision():
+    bad = _issue_rows(label="b")
+    bad[0] = _qrow(1, named=("Acme", "Beta", "Gamma", "Delta"), gold=("Acme",), label="b")
+    out = _mvv(_issue_rows(label="a"), bad)
+    assert out["runs"]["a"]["precision"]["passed"] is True and out["runs"]["b"]["precision"]["passed"] is False
+    assert out["precision_passed"] is False and out["passed"] is False
+
+
+def test_mvv_fails_when_a_run_is_missing():
+    out = _mvv(_issue_rows(label="a"))
+    assert out["passed"] is False and out["join_completeness_passed"] is False and out["precision_passed"] is False
+
+
+def test_mvv_fails_when_either_run_is_vacuous():
+    thin = [_qrow(1, anchors=()), _qrow(2, anchors=()), *_issue_rows(label="b")[2:]]
+    out = _mvv(_issue_rows(label="a"), thin)
+    assert out["runs"]["b"]["join_completeness"]["vacuous"] is True
+    assert out["join_completeness_passed"] is False and out["passed"] is False
+
+
+def test_mvv_reports_issue5_f1_beside_the_script_value_and_agg2_unasserted():
+    a = _issue_rows(label="a") + [_qrow(6, kind="aggregation", named=("Acme", "Beta"), gold=("Acme",), label="a"),
+                                  _qrow(7, kind="aggregation", named=("Acme",), gold=("Acme", "Beta"), label="a")]
+    out = _mvv(a, _issue_rows(label="b"))
+    assert out["script_issue5_f1"] == 0.7642857142857142
+    assert out["runs"]["a"]["issue5_f1"] == 1.0 and out["runs"]["a"]["issue5_recall"] == 1.0
+    agg = out["runs"]["a"]["agg2"]
+    assert agg["n"] == 2 and agg["precision"] == 0.75 and agg["recall"] == 0.75
+    assert out["runs"]["a"]["run_label"] == "a"
+
+
+def test_mvv_counts_heldout_runs_that_entered_the_branch():
+    held = [{"question": f"h{i}", "run_label": "heldout", "valid": i != 4, "resolution_entered": i in (0, 1, 4)}
+            for i in range(6)]
+    out = _mvv(_issue_rows(label="a"), _issue_rows(label="b"), held)
+    assert out["heldout"] == {"n": 6, "n_valid": 5, "n_invalid": 1, "entered": 2}
+
+
+# --- grown plans: tolerated shape, the sweep, the validity of a run ---
+
+
+@pytest.mark.parametrize("tags,grown", [
+    ("ad-hoc,grown", True), ("grown", True), (" grown , x", True),
+    ("builtin-template", False), ("builtin-template,lookup", False),
+    ("", True), (None, True), ("ad-hoc", True), ("builtin-template,grown", True),
+])
+def test_plan_is_grown_reads_tags_and_fails_closed(tags, grown):
+    assert herb_ladder.plan_is_grown({"id": 3, "tags": tags}) is grown
+
+
+def test_plan_is_grown_treats_a_missing_row_as_unproven():
+    assert herb_ladder.plan_is_grown(None) is True
+
+
+class FakeLibrary:
+    """A fake plan library with HttpPlanLibrary's three calls the harness uses; every call is logged."""
+
+    def __init__(self, plans, log=None, *, refuse=()):
+        self.plans = {p["id"]: {"tags": "", "disabled_at": None, **p} for p in plans}
+        self.log, self.refuse = [] if log is None else log, set(refuse)
+
+    def list_plans(self, limit=20, project="", *, include_disabled=False):
+        self.log.append(("list", include_disabled))
+        rows = [dict(p) for p in self.plans.values() if include_disabled or not p["disabled_at"]]
+        return rows[:limit]
+
+    def get_plan(self, plan_id):
+        self.log.append(("get", plan_id))
+        return dict(self.plans[plan_id]) if plan_id in self.plans else None
+
+    def set_plan_disabled(self, plan_id, *, reason=""):
+        self.log.append(("disable", plan_id, reason))
+        if plan_id in self.refuse or plan_id not in self.plans:
+            return False
+        self.plans[plan_id]["disabled_at"] = "2026-11-04T00:00:00Z"
+        return True
+
+    def grow(self, plan_id):
+        self.plans[plan_id] = {"id": plan_id, "tags": "ad-hoc,grown", "disabled_at": None}
+
+
+BUILTIN = {"id": 1, "tags": "builtin-template,lookup"}
+
+
+def test_sweep_disables_every_grown_plan_once_and_leaves_templates():
+    lib = FakeLibrary([BUILTIN, {"id": 7, "tags": "ad-hoc,grown"}, {"id": 9, "tags": "ad-hoc,grown"}])
+    assert herb_ladder.sweep_grown_plans(lib) == [7, 9]
+    assert [e[1] for e in lib.log if e[0] == "disable"] == [7, 9]
+    assert lib.plans[1]["disabled_at"] is None
+    assert all(e[2] == herb_ladder.GROWN_PLAN_REASON and e[2] for e in lib.log if e[0] == "disable")
+    assert herb_ladder.sweep_grown_plans(lib) == []                      # already disabled: not disabled again
+    assert [e for e in lib.log if e[0] == "disable"] == [("disable", 7, herb_ladder.GROWN_PLAN_REASON),
+                                                          ("disable", 9, herb_ladder.GROWN_PLAN_REASON)]
+
+
+def test_sweep_refuses_when_a_plan_will_not_disable():
+    lib = FakeLibrary([{"id": 7, "tags": "grown"}], refuse=[7])
+    with pytest.raises(herb_ladder.NxError, match="7"):
+        herb_ladder.sweep_grown_plans(lib)
+
+
+def test_sweep_refuses_a_list_that_may_have_been_cut_short(monkeypatch):
+    monkeypatch.setattr(herb_ladder, "PLAN_SWEEP_LIMIT", 2)
+    lib = FakeLibrary([{"id": 7, "tags": "grown"}, {"id": 8, "tags": "grown"}])
+    with pytest.raises(herb_ladder.NxError, match="limit"):
+        herb_ladder.sweep_grown_plans(lib)
+    assert not [e for e in lib.log if e[0] == "disable"]   # nothing is disabled on a list that may be partial
+
+
+def test_a_run_with_no_plan_is_valid_and_one_on_a_template_is_valid():
+    lib = FakeLibrary([BUILTIN])
+    assert herb_ladder.plan_validity(lib, None) == (True, "")
+    assert herb_ladder.plan_validity(lib, 1) == (True, "")
+
+
+def test_a_run_on_a_grown_plan_is_invalid():
+    lib = FakeLibrary([BUILTIN, {"id": 14, "tags": "ad-hoc,grown"}])
+    ok, why = herb_ladder.plan_validity(lib, 14)
+    assert ok is False and "grown plan 14" in why
+
+
+def test_a_run_whose_plan_row_cannot_be_read_is_invalid():
+    ok, why = herb_ladder.plan_validity(FakeLibrary([BUILTIN]), 99)
+    assert ok is False and "99" in why and "not found" in why
+
+
+class FakeAnswer:
+    """Stands in for nx_answer_call: logs each run beside the library's own log, can grow a plan after
+    a run (as the nx_answer grow site does) and reports a RepairReport per run."""
+
+    def __init__(self, lib, log, *, plan_id=1, final="Acme", grows=(), repair=None, cost=0.1):
+        self.lib, self.log, self.plan_id, self.final = lib, log, plan_id, final
+        self.grows, self.repair, self.cost, self.n = list(grows), repair, cost, 0
+
+    def __call__(self, question, scope, max_steps, timeout, budget_usd=0.5):
+        self.n += 1
+        self.log.append(("run", question))
+        if self.grows:
+            self.lib.grow(self.grows.pop(0))
+        env = {"final_text": self.final, "cost_usd": self.cost, "plan_id": self.plan_id, "step_count": 2,
+               "chunks": [], "evidence_texts": ["Customer CUST-0001: x"], "coverage_state": "covered",
+               "coverage_reason": ""}
+        if self.repair is not None:
+            env["repair"] = self.repair
+        return env
+
+
+def _issue_qs(n=5):
+    return [{"question": f"q{i}", "gold": ["Acme"], "citations": [], "kind": "issue"} for i in range(1, n + 1)]
+
+
+def test_every_nx_answer_run_is_preceded_by_a_sweep_of_the_grown_plans(monkeypatch):
+    log: list = []
+    lib = FakeLibrary([BUILTIN, {"id": 7, "tags": "ad-hoc,grown"}], log)
+    ans = FakeAnswer(lib, log, grows=[8, 9, 10])       # each run grows one more plan
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", ans)
+    rows, _ = herb_ladder.run_nx_answer_rows(_issue_qs(3), UNIVERSE, 2.0, plan_library=lib, label="a")
+    events = [e for e in log if e[0] in ("disable", "run")]
+    assert events == [("disable", 7, herb_ladder.GROWN_PLAN_REASON), ("run", "q1"),
+                      ("disable", 8, herb_ladder.GROWN_PLAN_REASON), ("run", "q2"),
+                      ("disable", 9, herb_ladder.GROWN_PLAN_REASON), ("run", "q3")]
+    assert [r["plans_disabled_before"] for r in rows] == [[7], [8], [9]]
+    assert lib.plans[10]["disabled_at"] is None            # grown by the last run: nothing runs after it
+
+
+def test_a_sweep_that_fails_stops_before_the_run(monkeypatch):
+    log: list = []
+    lib = FakeLibrary([{"id": 7, "tags": "grown"}], log, refuse=[7])
+    ans = FakeAnswer(lib, log)
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", ans)
+    with pytest.raises(herb_ladder.NxError):
+        herb_ladder.run_nx_answer_rows(_issue_qs(1), UNIVERSE, 2.0, plan_library=lib)
+    assert ans.n == 0
+
+
+def test_rows_carry_the_run_label_the_plan_and_the_repair_columns(monkeypatch):
+    log: list = []
+    lib = FakeLibrary([BUILTIN], log)
+    rep = {"resolution_entered": True, "anchor_key_ids": ["CUST-1"], "resolved": ["CUST-1"], "missing": [],
+           "ambiguous": [], "joined_dropped": 0}
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", FakeAnswer(lib, log, repair=rep))
+    rows, _ = herb_ladder.run_nx_answer_rows(_issue_qs(1), UNIVERSE, 2.0, plan_library=lib, label="b")
+    r = rows[0]
+    assert r["run_label"] == "b" and r["plan_id"] == 1 and r["valid"] is True and r["invalid_reason"] == ""
+    assert r["resolution_entered"] is True and r["anchor_key_ids"] == ["CUST-1"] and r["resolved"] == ["CUST-1"]
+    assert r["evidence_cust_ids"] == ["CUST-0001"] and r["evidence_companies"] == ["Acme"]
+
+
+def test_a_missing_repair_report_reads_as_not_entered_in_the_row(monkeypatch):
+    log: list = []
+    lib = FakeLibrary([BUILTIN], log)
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", FakeAnswer(lib, log, repair=None))
+    rows, _ = herb_ladder.run_nx_answer_rows(_issue_qs(1), UNIVERSE, 2.0, plan_library=lib)
+    assert rows[0]["resolution_entered"] is False and rows[0]["anchor_key_ids"] == []
+
+
+def test_a_run_answered_by_a_grown_plan_is_marked_invalid_and_does_not_pass(monkeypatch):
+    log: list = []
+    lib = FakeLibrary([BUILTIN, {"id": 14, "tags": "ad-hoc,grown"}], log)
+    # plan 14 is swept first, but the run still reports it (a cached plan): the run must not count
+    rep = {"resolution_entered": True, "anchor_key_ids": ["CUST-1"]}
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", FakeAnswer(lib, log, plan_id=14, repair=rep))
+    rows, _ = herb_ladder.run_nx_answer_rows(_issue_qs(5), UNIVERSE, 2.0, plan_library=lib)
+    assert all(r["valid"] is False and "grown plan 14" in r["invalid_reason"] for r in rows)
+    out = herb_ladder.join_completeness(rows, REGISTRY)
+    assert out["in_domain"] == 0 and out["passed"] is False
+
+
+def test_without_a_plan_library_no_row_claims_to_be_valid(monkeypatch):
+    log: list = []
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", FakeAnswer(FakeLibrary([]), log))
+    rows, _ = herb_ladder.run_nx_answer_rows(_issue_qs(1), UNIVERSE, 2.0)
+    assert rows[0]["valid"] is False and "not checked" in rows[0]["invalid_reason"]
+
+
+def test_mvv_runs_every_question_twice_labelled_a_and_b_under_one_cap(monkeypatch):
+    log: list = []
+    lib = FakeLibrary([BUILTIN], log)
+    ans = FakeAnswer(lib, log, cost=0.4)
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", ans)
+    rows, meta = herb_ladder.run_mvv_nx_answer(_issue_qs(5), UNIVERSE, 4.0, lib)
+    assert sorted(rows) == ["a", "b"]
+    assert [r["question"] for r in rows["a"]] == [r["question"] for r in rows["b"]] == [f"q{i}" for i in range(1, 6)]
+    assert {r["run_label"] for r in rows["a"]} == {"a"} and {r["run_label"] for r in rows["b"]} == {"b"}
+    assert ans.n == 10 and meta["total_cost_usd"] == pytest.approx(4.0) and meta["cap_usd"] == 4.0
+    assert [e[1] for e in log if e[0] == "run"] == [f"q{i}" for i in range(1, 6)] * 2   # a, then b
+
+
+def test_mvv_second_run_stops_at_what_the_first_left_of_the_cap(monkeypatch):
+    log: list = []
+    lib = FakeLibrary([BUILTIN], log)
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", FakeAnswer(lib, log, cost=0.6))
+    rows, meta = herb_ladder.run_mvv_nx_answer(_issue_qs(3), UNIVERSE, 2.0, lib)
+    ran = [[("skipped" not in r) for r in rows[l]] for l in "ab"]
+    assert ran == [[True, True, True], [True, False, False]]
+    assert meta["complete"] is False and meta["total_cost_usd"] == pytest.approx(2.4)
+    assert all(r["valid"] is False for r in rows["b"][1:])            # a skipped row never counts
+
+
+# --- the held-out single-hop set ---
+
+
+def _product(types):
+    return {"answerable_questions": [{"question": f"q{i}", "type": t, "ground_truth": f"g{i}",
+                                      "citations": [f"c{i}"]} for i, t in enumerate(types)]}
+
+
+def test_heldout_takes_non_company_questions_in_file_order_up_to_the_limit():
+    types = ["company", "content", "company", "pr", "person"] + ["content"] * 30
+    out = herb_ladder.held_out_questions(_product(types))
+    assert len(out) == 20 and [q["herb_index"] for q in out][:4] == [1, 3, 4, 5]
+    assert [q["herb_index"] for q in out] == sorted(q["herb_index"] for q in out)
+    assert all(q["type"] != "company" for q in out)
+    assert out[0] == {"herb_index": 1, "question": "q1", "type": "content", "ground_truth": "g1", "citations": ["c1"]}
+
+
+def test_heldout_takes_all_when_there_are_fewer_than_the_limit():
+    out = herb_ladder.held_out_questions(_product(["company", "pr", "person"]))
+    assert [q["herb_index"] for q in out] == [1, 2]
+
+
+def test_heldout_fixture_is_frozen_and_clean():
+    import hashlib
+    fx = json.loads((REPO / "benchmark" / "fixtures" / "herb" / "single_hop_heldout.json").read_text())
+    qs = fx["questions"]
+    assert len(qs) == 20 and len(qs) <= herb_ladder.HELDOUT_LIMIT and fx["product"] == "SearchFlow"
+    assert all(q["type"] != "company" for q in qs)
+    idx = [q["herb_index"] for q in qs]
+    assert idx == sorted(set(idx)), "file order is the HERB order: indices strictly increase"
+    assert len({q["question"] for q in qs}) == len(qs)
+    assert all(q["question"].strip() and q["ground_truth"] and q["citations"] for q in qs)
+    digest = hashlib.sha256(json.dumps(qs, sort_keys=True).encode()).hexdigest()
+    assert digest == fx["sha256"], "the stored digest no longer matches the questions"
+    assert digest == HELDOUT_SHA256, "the held-out set changed: it is frozen; change it only by decision"
+
+
+HELDOUT_SHA256 = "4737e1ae58d0b870f7f90b37dba90ab492e636cf9c307bc8cfa6f6da8567c323"
+
+
+def test_heldout_loader_returns_the_fixture_questions():
+    qs = herb_ladder.load_heldout()
+    assert len(qs) == 20 and qs[0]["herb_index"] == 0 and all(q["type"] != "company" for q in qs)
+
+
+def test_heldout_runs_once_each_with_the_sweep_and_counts_entered(monkeypatch):
+    log: list = []
+    lib = FakeLibrary([BUILTIN, {"id": 7, "tags": "grown"}], log)
+    reps = iter([{"resolution_entered": True}, {}, {"resolution_entered": True}])
+    ans = FakeAnswer(lib, log)
+
+    def call(*a, **k):
+        env = ans(*a, **k)
+        env["repair"] = next(reps)
+        return env
+
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", call)
+    held = [{"herb_index": i, "question": f"h{i}", "type": "content", "ground_truth": "g", "citations": ["c"]}
+            for i in range(3)]
+    rows, meta = herb_ladder.run_heldout_rows(held, 2.0, lib)
+    assert [r["question"] for r in rows] == ["h0", "h1", "h2"] and ans.n == 3
+    assert [r["resolution_entered"] for r in rows] == [True, False, True]
+    assert {r["run_label"] for r in rows} == {"heldout"} and all(r["valid"] for r in rows)
+    assert [e for e in log if e[0] == "disable"] == [("disable", 7, herb_ladder.GROWN_PLAN_REASON)]
+    assert [r["herb_index"] for r in rows] == [0, 1, 2]
+    assert meta["total_cost_usd"] == pytest.approx(0.3)
+
+
+# --- the exact-assert table holds only deterministic rungs ---
+
+
+def test_the_exact_assert_table_has_no_nx_answer_key():
+    assert herb_ladder.PREDICTIONS and not [k for k in herb_ladder.PREDICTIONS if "nx_answer" in k]
+    assert {"script_fixed.recall.issue5", "p3_hop1_precision", "p2_resolution_accuracy_29",
+            "oracle_cited.recall.issue5"} <= set(herb_ladder.PREDICTIONS)
+    assert herb_ladder.NX_ANSWER_PREDICTIONS and all(k.startswith("nx_answer.") for k in herb_ladder.NX_ANSWER_PREDICTIONS)
+
+
+def test_comparison_marks_nx_answer_rows_as_never_asserted_exactly():
+    measured = {"script_fixed.recall.issue5": 0.5, "nx_answer.recall.all7": 0.2}
+    rows = {r["metric"]: r for r in herb_ladder._compare(measured)}
+    assert rows["script_fixed.recall.issue5"]["asserted_exactly"] is True
+    assert rows["nx_answer.recall.all7"]["asserted_exactly"] is False
+    assert rows["nx_answer.recall.all7"]["measured"] == 0.2
+
+
+def test_the_script_issue5_f1_is_the_recorded_baseline_exactly():
+    """The one nx_answer-adjacent number asserted exactly: the SCRIPT's issue5 F1, a deterministic rung."""
+    recorded = json.loads((REPO / "results" / "herb" / "step0-baselines.json").read_text())
+    got = recorded["baselines"]["script_fixed"]["summary"]["issue5"]["f1"]
+    assert got == herb_ladder.SCRIPT_ISSUE5_F1 == 0.7642857142857142
+
+
+# --- the nx_answer driver hands the RepairReport through ---
+
+
+def _run_nxa_driver(monkeypatch, capsys, result):
+    async def nx_answer(**kw):
+        return result
+
+    def store_get_many(**kw):
+        return {"contents": []}
+
+    core = types.ModuleType("nexus.mcp.core")
+    core.nx_answer, core.store_get_many = nx_answer, store_get_many
+    for name, mod in (("nexus", types.ModuleType("nexus")), ("nexus.mcp", types.ModuleType("nexus.mcp")),
+                      ("nexus.mcp.core", core)):
+        monkeypatch.setitem(sys.modules, name, mod)
+    monkeypatch.setattr(sys, "argv", ["-c", "q", "knowledge__x", "6", "0.5"])
+    exec(compile(run_herb._NXA_DRIVER, "<nxa-driver>", "exec", dont_inherit=True), {"__name__": "__driver__"})
+    line = next(l for l in capsys.readouterr().out.splitlines() if l.startswith(run_herb._NXA_SENTINEL))
+    return json.loads(line[len(run_herb._NXA_SENTINEL):])
+
+
+def test_driver_envelope_carries_the_coverage_repair_report(monkeypatch, capsys):
+    rep = {"outcome": "completed", "resolution_entered": True, "anchor_key_ids": ["CUST-1"]}
+    env = _run_nxa_driver(monkeypatch, capsys, {"final_text": "x", "chunks": [], "plan_id": 3,
+                                                "coverage": {"state": "covered", "reason": "", "repair": rep}})
+    assert env["repair"] == rep and env["plan_id"] == 3
+
+
+def test_driver_envelope_without_a_repair_report_has_none(monkeypatch, capsys):
+    env = _run_nxa_driver(monkeypatch, capsys, {"final_text": "x", "chunks": [], "plan_id": 3, "coverage": {}})
+    assert env["repair"] is None
+    env = _run_nxa_driver(monkeypatch, capsys, "plain string answer")
+    assert env["repair"] is None
+
+
+# --- the sandbox plan-library adapter and its driver ---
+
+
+def _plan_env(world, monkeypatch, interp=None):
+    for k in ("HERB_SANDBOX", "HOME", "NEXUS_CONFIG_DIR", "HERB_NEXUS_REV"):
+        monkeypatch.delenv(k, raising=False)
+    for k, v in world.env.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(herb_ladder, "CONEXUS_PYTHON", interp or world.wheel_py)
+    monkeypatch.setattr(herb_ladder, "_real_home", lambda: str(world.real_home))
+
+
+@pytest.mark.parametrize("name", list(_BAD_ENVS))
+def test_plan_library_refuses_before_any_spawn(world, monkeypatch, name):
+    _plan_env(world, monkeypatch)
+    for k in ("HERB_SANDBOX", "HOME", "NEXUS_CONFIG_DIR", "HERB_NEXUS_REV"):
+        monkeypatch.delenv(k, raising=False)
+    for k, v in _BAD_ENVS[name][0](world).items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(herb_ladder.subprocess, "run",
+                        lambda *a, **k: pytest.fail("the guard let the plan library spawn a process"))
+    with pytest.raises(herb_ladder.NxError, match="refus"):
+        herb_ladder.SandboxPlanLibrary().list_plans()
+
+
+def test_plan_library_spawns_once_per_call_and_passes_the_operation(world, monkeypatch):
+    _plan_env(world, monkeypatch)
+    spawned = []
+
+    def fake_run(cmd, **kw):
+        spawned.append(cmd)
+        line = herb_ladder._NXA_SENTINEL + json.dumps({"result": True})
+        return subprocess.CompletedProcess(cmd, 0, stdout=line.encode(), stderr=b"")
+
+    monkeypatch.setattr(herb_ladder.subprocess, "run", fake_run)
+    lib = herb_ladder.SandboxPlanLibrary()
+    assert lib.set_plan_disabled(7, reason="r") is True
+    assert len(spawned) == 1 and spawned[0][0] == str(world.wheel_py)
+    assert spawned[0][-2] == "set_plan_disabled" and json.loads(spawned[0][-1]) == {"plan_id": 7, "reason": "r"}
+
+
+def test_plan_library_failure_raises_not_empty(world, monkeypatch):
+    _plan_env(world, monkeypatch)
+
+    def boom(cmd, **kw):
+        raise subprocess.CalledProcessError(1, cmd, output=b"", stderr=b"engine down")
+
+    monkeypatch.setattr(herb_ladder.subprocess, "run", boom)
+    with pytest.raises(herb_ladder.NxError, match="engine down"):
+        herb_ladder.SandboxPlanLibrary().get_plan(1)
+    monkeypatch.setattr(herb_ladder.subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout=b"no line", stderr=b""))
+    with pytest.raises(herb_ladder.NxError, match="no result"):
+        herb_ladder.SandboxPlanLibrary().get_plan(1)
+
+
+class _StubPlans:
+    def __init__(self, monkeypatch, base_url):
+        self.constructed, self.calls = [], []
+        stub = self
+
+        class Lib:
+            def __init__(self):
+                stub.constructed.append(1)
+                self._base_url = base_url
+
+            def set_plan_disabled(self, plan_id, *, reason=""):
+                stub.calls.append(("disable", plan_id, reason))
+                return True
+
+            def list_plans(self, limit=20, project="", *, include_disabled=False):
+                stub.calls.append(("list", limit, include_disabled))
+                return [{"id": 1, "tags": "grown"}]
+
+            def get_plan(self, plan_id):
+                stub.calls.append(("get", plan_id))
+                return None
+
+            def delete_plan(self, plan_id):
+                stub.calls.append(("delete", plan_id))
+
+        mods = {"nexus": types.ModuleType("nexus"), "nexus.db": types.ModuleType("nexus.db"),
+                "nexus.db.t2": types.ModuleType("nexus.db.t2"),
+                "nexus.db.t2.http_plan_library": types.ModuleType("nexus.db.t2.http_plan_library")}
+        mods["nexus.db.t2.http_plan_library"].HttpPlanLibrary = Lib
+        for name, mod in mods.items():
+            monkeypatch.setitem(sys.modules, name, mod)
+
+
+def _run_plan_driver(monkeypatch, op, args):
+    monkeypatch.setattr(sys, "argv", ["-c", op, json.dumps(args)])
+    exec(compile(herb_ladder._PLAN_DRIVER, "<plan-driver>", "exec", dont_inherit=True), {"__name__": "__driver__"})
+
+
+def test_plan_driver_runs_the_named_operation_on_a_loopback_service(world, monkeypatch, capsys):
+    _driver_world(world, monkeypatch)
+    stub = _StubPlans(monkeypatch, "http://127.0.0.1:9")
+    _run_plan_driver(monkeypatch, "set_plan_disabled", {"plan_id": 7, "reason": "r"})
+    line = next(l for l in capsys.readouterr().out.splitlines() if l.startswith(herb_ladder._NXA_SENTINEL))
+    assert json.loads(line[len(herb_ladder._NXA_SENTINEL):]) == {"result": True}
+    assert stub.calls == [("disable", 7, "r")]
+
+
+def test_plan_driver_refuses_a_non_loopback_service_and_an_unlisted_operation(world, monkeypatch):
+    _driver_world(world, monkeypatch)
+    stub = _StubPlans(monkeypatch, "https://api.conexus-nexus.com")
+    with pytest.raises(SystemExit, match="non-loopback"):
+        _run_plan_driver(monkeypatch, "list_plans", {})
+    assert stub.calls == []
+    stub = _StubPlans(monkeypatch, "http://127.0.0.1:9")
+    with pytest.raises(SystemExit, match="operation"):
+        _run_plan_driver(monkeypatch, "delete_plan", {"plan_id": 1})
+    assert stub.calls == []
+
+
+@pytest.mark.parametrize("name", list(_BAD_ENVS) + ["default interpreter"])
+def test_plan_driver_reasserts_the_sandbox_before_building_a_client(world, monkeypatch, name):
+    interp = world.tools / "current" / "bin" / "python3" if name == "default interpreter" else None
+    _driver_world(world, monkeypatch, interpreter=interp)
+    if name != "default interpreter":
+        for k in ("HERB_SANDBOX", "HOME", "NEXUS_CONFIG_DIR", "HERB_NEXUS_REV"):
+            monkeypatch.delenv(k, raising=False)
+        for k, v in _BAD_ENVS[name][0](world).items():
+            monkeypatch.setenv(k, v)
+    stub = _StubPlans(monkeypatch, "http://127.0.0.1:9")
+    with pytest.raises(SystemExit, match="refus"):
+        _run_plan_driver(monkeypatch, "list_plans", {})
+    assert stub.constructed == []
+
+
+# --- the scorecard: MVV section and the copy ---
+
+
+def test_the_mvv_section_goes_into_the_scorecard_with_the_run_labels(monkeypatch):
+    log: list = []
+    lib = FakeLibrary([BUILTIN], log)
+    rep = {"resolution_entered": True, "anchor_key_ids": ["CUST-1"]}
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", FakeAnswer(lib, log, repair=rep, cost=0.05))
+    registry = {"CUST-1": "Acme"}
+    qs = [{"question": f"q{i}", "gold": ["Acme"], "citations": [], "kind": "issue"} for i in range(1, 6)]
+    held = [{"herb_index": 0, "question": "h0", "type": "content", "ground_truth": "g", "citations": ["c"]}]
+    mvv = herb_ladder.run_mvv(qs, ["Acme"], registry, held, 4.0, lib)
+    assert mvv["score"]["passed"] is True and sorted(mvv["rows"]) == ["a", "b"]
+    assert mvv["heldout_rows"][0]["run_label"] == "heldout" and mvv["score"]["heldout"]["entered"] == 1
+    rungs = herb_ladder.mvv_rungs(mvv["score"])
+    assert {r["phase"] for r in rungs} == {"MVV"} and all(r["status"] == "GREEN" for r in rungs
+                                                          if r["target"] != "report")
+    assert any(r["metric"] == "issue5_f1[a]" and r["status"] == "BASELINE" for r in rungs)
+
+
+def test_copy_scorecard_copies_the_file_byte_for_byte(monkeypatch, tmp_path):
+    src = tmp_path / "herb-scorecard.json"
+    src.write_text('{"rdr": "RDR-147"}\n')
+    monkeypatch.setattr(herb_ladder, "_SCORECARD", src)
+    dest = tmp_path / "evidence" / "rdr-147"
+    out = herb_ladder.copy_scorecard(dest)
+    assert out == dest / "herb-scorecard.json" and out.read_bytes() == src.read_bytes()
+
+
+def test_copy_scorecard_refuses_a_missing_scorecard(monkeypatch, tmp_path):
+    monkeypatch.setattr(herb_ladder, "_SCORECARD", tmp_path / "absent.json")
+    with pytest.raises(herb_ladder.NxError, match="absent.json"):
+        herb_ladder.copy_scorecard(tmp_path / "out")
+    assert not (tmp_path / "out").exists()
+
+
+def test_heldout_loader_refuses_an_edited_fixture(tmp_path):
+    fx = json.loads((REPO / "benchmark" / "fixtures" / "herb" / "single_hop_heldout.json").read_text())
+    fx["questions"][0]["question"] += " (edited)"
+    path = tmp_path / "h.json"
+    path.write_text(json.dumps(fx))
+    with pytest.raises(herb_ladder.NxError, match="frozen"):
+        herb_ladder.load_heldout(path)
+    with pytest.raises(herb_ladder.NxError, match="missing"):
+        herb_ladder.load_heldout(tmp_path / "absent.json")
+
+
+def test_freezing_the_heldout_set_never_overwrites_it(tmp_path):
+    path = tmp_path / "h.json"
+    fx = herb_ladder.freeze_heldout(_product(["company", "pr", "person"]), path)
+    assert [q["herb_index"] for q in fx["questions"]] == [1, 2] and fx["n_non_company_in_source"] == 2
+    assert herb_ladder.load_heldout(path) == fx["questions"]
+    before = path.read_text()
+    with pytest.raises(herb_ladder.NxError, match="frozen"):
+        herb_ladder.freeze_heldout(_product(["pr"]), path)
+    assert path.read_text() == before
+
+
+def test_completeness_compares_company_names_case_insensitively():
+    out = _jc([_qrow(1, named=("ACME",)), *_issue_rows()[1:]])
+    assert out["questions"][0]["complete"] is True and out["passed"] is True
+
+
+def test_precision_of_exactly_0_95_passes():
+    out = herb_ladder.precision_gate(_prec_rows([(3, 4), (1, 1), (1, 1), (1, 1), (1, 1)]))
+    assert out["mean"] == pytest.approx(0.95) and out["passed"] is True
+
+
+def test_invalid_rows_are_left_out_of_the_reported_figures():
+    a = _issue_rows(label="a")
+    a[0] = _qrow(1, named=(), gold=("Acme",), valid=False)            # would drag issue5 recall to 0.8
+    a.append(_qrow(6, kind="aggregation", named=("Acme",), gold=("Acme",), label="a"))
+    a.append(_qrow(7, kind="aggregation", named=(), gold=("Acme",), label="a", valid=False))
+    out = _mvv(a, _issue_rows(label="b"))["runs"]["a"]
+    assert out["n_invalid"] == 2 and out["summary"]["issue5"]["n"] == 4 and out["issue5_recall"] == 1.0
+    assert out["agg2"]["n"] == 1 and out["agg2"]["recall"] == 1.0
+
+
+def test_the_scorecard_rungs_go_red_when_a_gate_fails():
+    bad = _issue_rows(label="b")
+    bad[0] = _qrow(1, named=("Acme", "Beta", "Gamma", "Delta"), label="b")        # precision 0.25 on one question
+    bad[1] = _qrow(2, entered=False, label="b")                                    # and a question that did not enter
+    rungs = {r["metric"]: r for r in herb_ladder.mvv_rungs(_mvv(_issue_rows(label="a"), bad))}
+    assert rungs["join_completeness_both_runs"]["status"] == "RED" and rungs["join_completeness_both_runs"]["value"] == 0.0
+    assert rungs["precision_mean_both_runs"]["status"] == "RED"
+    assert rungs["precision_mean_both_runs"]["value"] == pytest.approx(0.85)
+    good = {r["metric"]: r for r in herb_ladder.mvv_rungs(_mvv(_issue_rows(label="a"), _issue_rows(label="b")))}
+    assert good["join_completeness_both_runs"]["status"] == good["precision_mean_both_runs"]["status"] == "GREEN"
+
+
+def test_the_heldout_runs_get_only_what_the_issue_runs_left_of_the_cap(monkeypatch):
+    log: list = []
+    lib = FakeLibrary([BUILTIN], log)
+    ans = FakeAnswer(lib, log, cost=0.39)
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", ans)
+    held = [{"herb_index": i, "question": f"h{i}", "type": "content", "ground_truth": "g", "citations": ["c"]}
+            for i in range(3)]
+    out = herb_ladder.run_mvv(_issue_qs(5), UNIVERSE, REGISTRY, held, 4.0, lib)
+    # 10 issue runs at 0.39 = 3.9; 0.1 is left: one held-out run (0.39 -> over), the rest are skipped
+    assert [("skipped" in r) for r in out["heldout_rows"]] == [False, True, True]
+    assert out["meta"]["total_cost_usd"] == pytest.approx(10 * 0.39 + 0.39) and out["meta"]["complete"] is False
+
+
+def test_repair_columns_copy_a_list_of_dropped_items_and_bad_counts_read_as_zero():
+    assert herb_ladder.repair_columns({"joined_dropped": ["x", "y"]})["joined_dropped"] == ["x", "y"]
+    assert herb_ladder.repair_columns({"joined_dropped": True})["joined_dropped"] == 0
+    assert herb_ladder.repair_columns({"joined_dropped": "3"})["joined_dropped"] == 0
+    assert herb_ladder.repair_columns({"ambiguous": {"CUST-1": ["h1", "h2"]}})["ambiguous"] == {"CUST-1": ["h1", "h2"]}
+
+
+def test_build_with_mvv_records_the_verdict_and_runs_nx_answer_only_through_the_mvv(monkeypatch, members):
+    log: list = []
+    lib = FakeLibrary([BUILTIN], log)
+    rep = {"resolution_entered": True, "anchor_key_ids": ["CUST-1"]}
+    ans = FakeAnswer(lib, log, repair=rep, cost=0.05)
+    questions = [{"question": f"issue {i}", "type": "company", "ground_truth": ["Acme"], "citations": []}
+                 for i in range(5)]
+    questions += [{"question": f"maximum number {i}", "type": "company", "ground_truth": ["Acme"], "citations": []}
+                  for i in range(2)]
+    held = [{"herb_index": 0, "question": "h0", "type": "content", "ground_truth": "g", "citations": ["c"]}]
+    monkeypatch.setattr(herb_ladder, "_load_gold", lambda: {
+        "members": members, "cust_to_company": REGISTRY, "mentions": {}, "q_to_custs": {}})
+    monkeypatch.setattr(herb_ladder, "_load_product", lambda: {"answerable_questions": questions})
+    monkeypatch.setattr(herb_ladder, "load_heldout", lambda: held)
+    monkeypatch.setattr(herb_ladder, "service_versions", lambda: dict(_VERSIONS))
+    monkeypatch.setattr(herb_ladder, "resolve_p2_tokens", _FakeResolver(members))
+    monkeypatch.setattr(herb_ladder, "score_p3_detail", lambda q, k: [])
+    monkeypatch.setattr(herb_ladder, "run_script_rows", lambda qs, k: [])
+    monkeypatch.setattr(herb_ladder, "run_oracle_rows", lambda qs, p: [])
+    monkeypatch.setattr(herb_ladder, "run_oracle_retrieval_rows", lambda qs: [])
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", ans)
+    card, baselines = herb_ladder.build(nx_answer=True, mvv=True, cap_usd=4.0, plan_library=lib)
+    assert ans.n == 2 * 7 + 1                               # two labelled runs of 7 questions + 1 held-out, no third run
+    assert card["mvv"]["passed"] is True and sorted(card["mvv"]["rows"]) == ["a", "b"]
+    assert card["mvv"]["script_issue5_f1"] == 0.7642857142857142 and card["mvv"]["heldout"]["entered"] == 1
+    assert {r["metric"] for r in card["rungs"] if r["phase"] == "MVV"} >= {
+        "join_completeness_both_runs", "precision_mean_both_runs", "issue5_f1[a]", "issue5_f1[b]"}
+    assert not any(r["phase"] == "E2E-nx_answer" for r in card["rungs"])
+    nx = baselines["baselines"]["nx_answer_mvv"]
+    assert nx["score"]["passed"] is True and nx["rows"] == card["mvv"]["rows"]
+    assert {c["metric"]: c["asserted_exactly"] for c in baselines["comparison_predicted_vs_measured"]
+            }["nx_answer.recall.all7"] is False

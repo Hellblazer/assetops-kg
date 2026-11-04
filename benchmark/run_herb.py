@@ -407,10 +407,11 @@ _NXA_DRIVER = textwrap.dedent(
                     "plan_id": r.get("plan_id"), "step_count": r.get("step_count"),
                     "cost_usd": r.get("cost_usd"), "duration_ms": r.get("duration_ms"),
                     "coverage_reason": (r.get("coverage") or {{}}).get("reason"),
-                    "coverage_state": (r.get("coverage") or {{}}).get("state")}}
+                    "coverage_state": (r.get("coverage") or {{}}).get("state"),
+                    "repair": (r.get("coverage") or {{}}).get("repair")}}
         else:
             out = {{"final_text": r, "chunks": [], "evidence_texts": [], "plan_id": None,
-                    "step_count": None, "cost_usd": None, "duration_ms": None}}
+                    "step_count": None, "cost_usd": None, "duration_ms": None, "repair": None}}
         print("{sentinel}" + json.dumps(out))
     asyncio.run(go())
     """

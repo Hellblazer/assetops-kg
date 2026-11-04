@@ -67,6 +67,60 @@ cost. `results/herb/herb-scorecard.json` is the compact rung list.
 Every read is `nx search --json` (full chunk text). `-c` truncates each hit at 200
 characters; do not use it. Any nx failure raises `NxError`; nothing returns "" on error.
 
+## The RDR-147 MVV (`--mvv`, nexus-bwct4.1)
+
+The MVV run (nexus-irndi) uses this mode; it spends (cap 4 USD, `MVV_CAP_USD`) and refuses to start unless
+the sandbox guard is satisfied (`HERB_SANDBOX=1`, `HOME` and `NEXUS_CONFIG_DIR` under `.herb-sandbox`, no
+`NX_SERVICE_*`, `NX_PYTHON` a sandbox venv, `HERB_NEXUS_REV` set):
+
+```bash
+HERB_NEXUS_REV=<sha> HERB_SANDBOX_LLM=1 python3 <nexus>/tests/e2e/lib/claude_credentials.py run -- \
+    $SB run python3 -m benchmark.herb_ladder --mvv
+python3 -m benchmark.herb_ladder --copy-scorecard-to <nexus>/docs/rdr/evidence/rdr-147   # then commit it in nexus
+```
+
+The sandbox's own config carries the resolution switch and the `entity.collections` pattern; whoever runs
+the MVV writes them (the harness does not).
+
+Rules, as the code applies them (`join_completeness`, `precision_gate`, `score_mvv`):
+
+1. **Two runs per question**, labelled `a` and `b`, under one spend cap (`b` gets what `a` left).
+2. **Grown plans are disabled before every run.** `sweep_grown_plans` soft-disables every active plan that
+   is not a curated template (`HttpPlanLibrary.set_plan_disabled`, once each) and refuses a list that may
+   be partial. After the run the reported `plan_id` is read back: a grown plan, or a row that cannot be
+   read, makes the run **invalid**. An invalid run is recorded, excluded from every figure, and fails its
+   run's gates (the run is not a measurement; rerun it). A run made without a plan library is never valid.
+3. **Branch-entered columns.** Each row copies `resolution_entered`, `anchor_key_ids`, `resolved`,
+   `missing`, `ambiguous`, `joined_dropped` from the envelope's `repair` (the RepairReport,
+   `coverage.repair`), tolerantly: an absent field is "not entered" or empty. Only a boolean `true` counts
+   as entered.
+4. **Join completeness (gated).** Domain: issue questions whose `anchor_key_ids` is non-empty in that run.
+   A question passes when its answer names every company those anchor ids give in the registry
+   (`cust_to_company.json`, case-insensitive) and `resolution_entered` is true. Anchor ids the registry
+   cannot map do not pass. At least 4 of the 5 issue questions must be in the domain in each run; fewer is a
+   vacuous run and a fail. Completeness over all hydrated evidence ids is reported beside it, not gated.
+5. **Precision (gated).** Per run, the mean over the 5 issue questions of per-question precision
+   (`score_set`), at least 0.95, in both runs. The pooled ratio and the per-question values are reported.
+6. **A question passes only where `resolution_entered` is true** (a pass through the semantic repair alone
+   does not count).
+7. **Held-out single-hop set.** `fixtures/herb/single_hop_heldout.json` is frozen: the first 20 SearchFlow
+   answerable questions whose type is not `company`, in file order, with `herb_index` (their position in
+   `answerable_questions`; HERB questions carry no id), ground truth and citations, the HERB commit and a
+   sha256 of the questions. `load_heldout` refuses an edited file, `--freeze-heldout` never overwrites it.
+   Each question runs once behind the same sweep; the scorecard counts the valid runs where the branch
+   entered, and the issue-question counts per run.
+8. **Exact assertions only for deterministic rungs** (P2, P3, the script, both oracles: `PREDICTIONS`).
+   nx_answer and aggregation rows are recorded with their run label and never asserted exactly
+   (`NX_ANSWER_PREDICTIONS`, `asserted_exactly: false` in the comparison).
+9. **Reported, not gated:** issue5 recall, precision and F1 per run beside the script's issue5 F1
+   (`0.7642857142857142`, `SCRIPT_ISSUE5_F1`, asserted exactly against the recorded baseline); agg2 recall,
+   precision and F1 per run.
+10. **Output.** `results/herb/herb-scorecard.json` gains an `MVV` rung group and an `mvv` section (the verdict,
+    every per-run row, the held-out rows, spend); `step0-baselines.json` gains `baselines.nx_answer_mvv`.
+
+The harness tests (`tests/test_herb_harness.py`, unmarked) pin all of this on fixture rows and fakes: no
+interpreter, no sandbox, no service, no model.
+
 ## Telemetry
 
 `--mode eval` writes `results/herb/<product>-<arm>-<assetops_sha>.json` with a `manifest`
