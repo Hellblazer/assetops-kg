@@ -291,7 +291,9 @@ def p2_sandbox_violations(env: Mapping[str, str], interpreter: Any, real_home: A
     HERB_SANDBOX=1 alone is not enough (it can be exported by hand): NEXUS_CONFIG_DIR and HOME must
     both lie under a ``.herb-sandbox`` directory (symlinks and ``..`` resolved), the interpreter must
     not be the one installed under *real_home*'s nexus tools directory (it would read the operator's
-    own service config), and HERB_NEXUS_REV must name the nexus revision being measured."""
+    own service config), no NX_SERVICE_* endpoint or token may be set (nexus reads them before
+    the config dir, so they would reach whatever service they name, a loopback live one included),
+    and HERB_NEXUS_REV must name the nexus revision being measured."""
     import os
     import re
 
@@ -308,6 +310,8 @@ def p2_sandbox_violations(env: Mapping[str, str], interpreter: Any, real_home: A
     interp_dir = os.path.realpath(os.path.dirname(os.path.abspath(str(interpreter))))
     if interp_dir == tools or interp_dir.startswith(tools + os.sep):
         bad.append(f"interpreter {interpreter} is the installed nexus ({tools}); set NX_PYTHON to a sandbox venv")
+    for key in sorted(k for k in env if k.startswith("NX_SERVICE_")):
+        bad.append(f"{key} is set; the sandbox's own config names its service")
     if not re.fullmatch(r"[0-9a-f]{7,40}", env.get("HERB_NEXUS_REV", "")):
         bad.append("HERB_NEXUS_REV is not set to the nexus git revision under test (hex, 7-40 chars)")
     return bad
@@ -804,8 +808,9 @@ def emit_p2_resolve(date: str | None = None,
            "sandbox": os.environ.get("HERB_SANDBOX") == "1", "spend_usd": 0.0, **versions, **detail}
     _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out = _RESULTS_DIR / f"p2-resolve-{date}.json"
-    out.write_text(json.dumps(row, indent=2))
+    # Patch first: a scorecard that does not hold exactly one P2 rung raises before either file is written.
     card = patch_scorecard_p2(json.loads(_SCORECARD.read_text()), detail, versions, row["timestamp_utc"], out.name)
+    out.write_text(json.dumps(row, indent=2))
     _SCORECARD.write_text(json.dumps(card, indent=2))
     status = next(r["status"] for r in card["rungs"] if r["phase"] == "P2")
     console.print(f"P2 via resolve: accuracy {detail['accuracy']:.3f} ({detail['hits']}/{detail['n_tokens']}), "

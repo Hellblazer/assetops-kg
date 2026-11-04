@@ -386,6 +386,18 @@ def _drop(key):
     return lambda w: {k: v for k, v in w.env.items() if k != key}
 
 
+def _sandbox_named_link(key, leaf):
+    """A path that names a .herb-sandbox directory but is a symlink to the real home: realpath must
+    see through it."""
+    def make(w):
+        link = w.tmp / "decoy" / ".herb-sandbox" / leaf
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if not link.exists():
+            link.symlink_to(w.real_home, target_is_directory=True)
+        return {**w.env, key: str(link)}
+    return make
+
+
 _BAD_ENVS = {
     "no HERB_SANDBOX": (_drop("HERB_SANDBOX"), "HERB_SANDBOX"),
     "HERB_SANDBOX not 1": (lambda w: {**w.env, "HERB_SANDBOX": "yes"}, "HERB_SANDBOX"),
@@ -401,6 +413,11 @@ _BAD_ENVS = {
     "no HERB_NEXUS_REV": (_drop("HERB_NEXUS_REV"), "HERB_NEXUS_REV"),
     "empty HERB_NEXUS_REV": (lambda w: {**w.env, "HERB_NEXUS_REV": ""}, "HERB_NEXUS_REV"),
     "HERB_NEXUS_REV not a revision": (lambda w: {**w.env, "HERB_NEXUS_REV": "develop"}, "HERB_NEXUS_REV"),
+    "service URL set": (lambda w: {**w.env, "NX_SERVICE_URL": "http://127.0.0.1:7777"}, "NX_SERVICE_URL"),
+    "service token set": (lambda w: {**w.env, "NX_SERVICE_TOKEN": "t"}, "NX_SERVICE_TOKEN"),
+    "HOME is a sandbox-named symlink to the real home": (_sandbox_named_link("HOME", "home"), "HOME"),
+    "config dir is a sandbox-named symlink to the real one": (_sandbox_named_link("NEXUS_CONFIG_DIR", "cfg"),
+                                                              "NEXUS_CONFIG_DIR"),
 }
 
 
@@ -443,6 +460,18 @@ def test_resolve_p2_tokens_refuses_before_any_spawn(world, monkeypatch, name):
                         lambda *a, **k: pytest.fail("the guard let resolve_p2_tokens spawn a process"))
     with pytest.raises(herb_ladder.NxError, match="refus"):
         herb_ladder.resolve_p2_tokens(["CUST-0001"])
+
+
+def _drop_service_env(monkeypatch):
+    for k in [k for k in os.environ if k.startswith("NX_SERVICE_")]:
+        monkeypatch.delenv(k)
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_service_env(monkeypatch):
+    """An operator's shell may export NX_SERVICE_*; the P2 guard refuses on them, so no test may
+    inherit them (a case that wants one sets it itself)."""
+    _drop_service_env(monkeypatch)
 
 
 def test_resolve_p2_tokens_spawns_exactly_once_for_a_sandbox_env(world, monkeypatch):
@@ -621,6 +650,22 @@ def test_emit_p2_resolve_records_the_revision_and_leaves_baselines_alone(members
     card = json.loads((results / "herb-scorecard.json").read_text())
     assert card["p2_resolve"]["nexus_revision"] == REV and card["p2_resolve"]["file"] == "p2-resolve-2026-11-04.json"
     assert card["rungs"][1]["status"] == "GREEN"
+
+
+def test_emit_p2_resolve_writes_nothing_when_the_scorecard_has_no_single_p2_rung(members, monkeypatch, tmp_path):
+    results = tmp_path / "herb"
+    results.mkdir()
+    card_path = results / "herb-scorecard.json"
+    card_path.write_text(json.dumps(_card("P1", "P3")))
+    before = card_path.read_text()
+    monkeypatch.setattr(herb_ladder, "_RESULTS_DIR", results)
+    monkeypatch.setattr(herb_ladder, "_SCORECARD", card_path)
+    monkeypatch.setattr(herb_ladder, "service_versions", lambda: dict(_VERSIONS))
+    monkeypatch.setattr(herb_ladder, "_load_gold", lambda: {"members": members})
+    with pytest.raises(ValueError):
+        herb_ladder.emit_p2_resolve(date="2026-11-04", resolver=_FakeResolver(members))
+    assert not (results / "p2-resolve-2026-11-04.json").exists(), "a dated row with no scorecard patch"
+    assert card_path.read_text() == before
 
 
 def test_full_build_gives_p2_resolve_the_same_shape(members, monkeypatch):
