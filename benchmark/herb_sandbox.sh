@@ -35,6 +35,9 @@
 #   ./benchmark/herb_sandbox.sh destroy               # down, then remove the sandbox tree
 #   ./benchmark/herb_sandbox.sh --self-test           # the env-allowlist checks, no nexus needed
 #
+# The nx_answer switches NX_ANSWER_RESOLUTION_REPAIR (the RDR-147 resolution branch, off unless on) and
+# NX_ANSWER_COVERAGE pass through the allowlist when set; nexus reads them from the environment only.
+#
 # Overrides: HERB_SANDBOX_DIR (default <repo>/.herb-sandbox), NX_BIN (default: nx on PATH),
 # NX_PYTHON (default: the installed nx's interpreter; the P2 rung refuses that one, see README-herb.md),
 # HERB_NEXUS_REV (nexus git revision under test; passed through, required by the P2 rung).
@@ -90,6 +93,11 @@ _sandbox_env() {
   )
   # The nexus revision under test (not a secret): the P2 driver refuses to run without it.
   if [ -n "${HERB_NEXUS_REV:-}" ]; then e+=("HERB_NEXUS_REV=$HERB_NEXUS_REV"); fi
+  # The nx_answer switches (not secrets). nexus reads NX_ANSWER_RESOLUTION_REPAIR from the process environment
+  # ONLY, never from config, and it is off unless set to an on value: the MVV (--mvv) refuses to spend without
+  # it. NX_ANSWER_COVERAGE is passed too so the harness's own check sees what the child will see.
+  if [ -n "${NX_ANSWER_RESOLUTION_REPAIR:-}" ]; then e+=("NX_ANSWER_RESOLUTION_REPAIR=$NX_ANSWER_RESOLUTION_REPAIR"); fi
+  if [ -n "${NX_ANSWER_COVERAGE:-}" ]; then e+=("NX_ANSWER_COVERAGE=$NX_ANSWER_COVERAGE"); fi
   if [ -n "${HTTPS_PROXY:-}" ]; then e+=("HTTPS_PROXY=$HTTPS_PROXY"); fi
   if [ -n "${HTTP_PROXY:-}" ]; then e+=("HTTP_PROXY=$HTTP_PROXY"); fi
   if [ "${HERB_SANDBOX_LLM:-0}" = 1 ] && [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
@@ -190,6 +198,11 @@ cmd_self_test() {
   grep -qx "NEXUS_CONFIG_DIR=$SB_CFG" <<<"$out" || { echo "FAIL: NEXUS_CONFIG_DIR is not the sandbox"; fail=1; }
   grep -qx "NX_LOCAL=1" <<<"$out" || { echo "FAIL: NX_LOCAL"; fail=1; }
   grep -qx "NX_NO_TELEMETRY=1" <<<"$out" || { echo "FAIL: NX_NO_TELEMETRY"; fail=1; }
+  out="$( (unset NX_ANSWER_RESOLUTION_REPAIR NX_ANSWER_COVERAGE; _sandbox_env | tr '\0' '\n') )"
+  if grep -q "^NX_ANSWER_RESOLUTION_REPAIR=" <<<"$out"; then echo "FAIL: NX_ANSWER_RESOLUTION_REPAIR passed when unset"; fail=1; fi
+  out="$(NX_ANSWER_RESOLUTION_REPAIR=1 NX_ANSWER_COVERAGE=1 _sandbox_env | tr '\0' '\n')"
+  grep -qx "NX_ANSWER_RESOLUTION_REPAIR=1" <<<"$out" || { echo "FAIL: NX_ANSWER_RESOLUTION_REPAIR not passed"; fail=1; }
+  grep -qx "NX_ANSWER_COVERAGE=1" <<<"$out" || { echo "FAIL: NX_ANSWER_COVERAGE not passed"; fail=1; }
   out="$(HERB_NEXUS_REV=3e608f6b2 _sandbox_env | tr '\0' '\n')"
   grep -qx "HERB_NEXUS_REV=3e608f6b2" <<<"$out" || { echo "FAIL: HERB_NEXUS_REV not passed"; fail=1; }
   out="$(HERB_SANDBOX_LLM=1 _sandbox_env | tr '\0' '\n')"
