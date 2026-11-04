@@ -119,12 +119,20 @@ def test_p1_mentions_link_recall_is_total(gold):
     assert recall == 1.0  # every gold artifact--mentions-->customer pair has an edge
 
 
-# --- P2: exact title lookup over the 29 members (GREEN today) ---
+# --- P2: the `resolve` step over the 29 members (RDR-147 Step 3, nexus-v9v5r) ---
+#
+# Only the live test is here; the fake-resolver pins, the sandbox guard and the driver tests are
+# unit tests of the harness, in tests/test_herb_harness.py (unmarked, no sandbox, no nx).
 
 
 def test_p2_resolution_accuracy_is_total(gold):
-    acc = herb.score_p2_resolution_accuracy(gold["members"])
-    assert acc == 1.0
+    """Live: the sandbox catalog, through resolve_keys."""
+    detail = herb.score_p2_resolution(gold["members"])
+    assert detail["accuracy"] == 1.0
+    assert detail["missing"] == [] and detail["ambiguous"] == {}
+    assert detail["passed"] is True
+    assert detail["n_tokens"] == 29 and detail["resolve_calls"] == 1
+    assert detail["nexus_revision"] and detail["nexus_dist_version"]
 
 
 # --- P3: hop-1 precision (RED until a precision step exists) ---
