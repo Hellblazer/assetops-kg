@@ -129,7 +129,9 @@ NX_ANSWER_PREDICTIONS: dict[str, dict[str, Any]] = {
 RUN_LABELS = ("a", "b")          # every issue question runs twice
 ISSUE_QUESTIONS = 5              # the issue questions the gates are taken over
 DOMAIN_FLOOR = 4                 # join completeness: at least this many issue questions in the domain, per run
-PRECISION_GATE = 0.95            # per-run mean of per-question precision, in both runs
+MAX_DOMAIN_MISSES = 1            # join completeness: at most this many in-domain questions may fail, per run
+                                 # (Sam 2026-11-05, T2 nexus/rdr147-mvv-bar-revision-2026-11-05: assessor variance)
+PRECISION_GATE = 0.95            # per-run mean of per-question precision over the questions that named a company
 HELDOUT_LIMIT = 20               # the single-hop held-out set: the first 20 non-company SearchFlow questions
 MVV_CAP_USD = 4.0                # spend cap of the MVV run
 # The script's issue5 F1 (step0-baselines.json): the diagnostic baseline the nx_answer F1 is reported beside.
@@ -1270,15 +1272,17 @@ def _count(v: Any) -> int:
 
 
 def join_completeness(rows: list[dict[str, Any]], cust_to_company: Mapping[str, str], *,
-                      floor: int = DOMAIN_FLOOR, n_issue: int = ISSUE_QUESTIONS) -> dict[str, Any]:
+                      floor: int = DOMAIN_FLOOR, n_issue: int = ISSUE_QUESTIONS,
+                      max_misses: int = MAX_DOMAIN_MISSES) -> dict[str, Any]:
     """Join completeness of ONE run, gated (RDR-147 MVV).
 
     The domain is the issue questions whose ``anchor_key_ids`` is non-empty in this run: the branch scans
     the boundary's anchors, not all the evidence. A question passes when it is in the domain, its answer
     names every company its anchor ids give (through the registry), and ``resolution_entered`` is true
     (a pass through the semantic repair alone does not count). The run passes when ``n_issue`` issue rows
-    all ran validly, at least ``floor`` are in the domain (fewer is a vacuous run, a fail), and every
-    in-domain question passes. Anchor ids cut on the wire cannot be graded: that question fails.
+    all ran validly, at least ``floor`` are in the domain (fewer is a vacuous run, a fail), and at most
+    ``max_misses`` in-domain questions fail (Sam 2026-11-05: one miss per run, the re-check's variance on
+    the same joined item). Anchor ids cut on the wire cannot be graded: that question fails.
 
     The ``verdict`` is ``invalid`` (not a measurement) when a row did not run validly or the issue rows are not
     ``n_issue``; else ``failed`` or ``passed``. A usable question outside the domain says why (its
@@ -1337,6 +1341,7 @@ def join_completeness(rows: list[dict[str, Any]], cust_to_company: Mapping[str, 
                           "resolved_only": {"companies": res_companies, "missing_companies": res_missing,
                                             "complete": bool(res_companies) and not res_missing}})
     n_in = sum(q["in_domain"] for q in questions)
+    n_missed = sum(1 for q in questions if q["in_domain"] and not q["passed"])
     n_invalid = sum(not q["valid"] for q in questions)
     vacuous = n_in < floor
     ev = []
@@ -1350,7 +1355,7 @@ def join_completeness(rows: list[dict[str, Any]], cust_to_company: Mapping[str, 
                    "evidence_companies": ev_companies, "missing_companies": miss, "complete": not miss})
     if len(issue) != n_issue or n_invalid:
         verdict = "invalid"
-    elif vacuous or not all(q["passed"] for q in questions if q["in_domain"]):
+    elif vacuous or n_missed > max_misses:
         verdict = "failed"
     else:
         verdict = "passed"
@@ -1361,8 +1366,10 @@ def join_completeness(rows: list[dict[str, Any]], cust_to_company: Mapping[str, 
     elif vacuous:
         reason = f"vacuous: {n_in} of {len(issue)} issue questions in the domain, floor {floor}"
     else:
-        reason = "" if verdict == "passed" else "an in-domain question failed"
+        reason = (f"{n_missed} in-domain question(s) failed, at most {max_misses} allowed" if verdict == "failed"
+                  else f"{n_missed} in-domain miss(es), at most {max_misses} allowed" if n_missed else "")
     return {"n_issue": len(issue), "in_domain": n_in, "floor": floor, "vacuous": vacuous, "n_invalid": n_invalid,
+            "n_missed": n_missed, "max_misses": max_misses,
             "passed": verdict == "passed", "verdict": verdict, "reason": reason, "questions": questions,
             "excluded_with_evidence_ids": sum(1 for q in questions
                                               if q["domain_exclusion"] and q["domain_exclusion"]["evidence_holds_ids"]),
@@ -1377,21 +1384,25 @@ def join_completeness(rows: list[dict[str, Any]], cust_to_company: Mapping[str, 
 
 def precision_gate(rows: list[dict[str, Any]], threshold: float = PRECISION_GATE,
                    n_issue: int = ISSUE_QUESTIONS) -> dict[str, Any]:
-    """Precision of ONE run, gated: the MEAN over the issue questions of per-question precision
-    (``score_set``), at least *threshold*. This is the aggregation that gave 0.9667 in 147-research-9.
-    The pooled ratio and the per-question values are reported beside it. The run is ``invalid`` (not a
-    measurement) unless ``n_issue`` issue rows all ran validly; else ``passed`` or ``failed``."""
+    """Precision of ONE run, gated: the MEAN of per-question precision (``score_set``) over the issue questions
+    whose answer named at least one company, at least *threshold*. A question that named none is left out
+    (Sam 2026-11-05: precision of the named companies is undefined there, and join completeness already counts
+    the non-answer); its ``per_question`` value is None. A run in which no question named a company fails.
+    The pooled ratio is reported beside it. The run is ``invalid`` (not a measurement) unless ``n_issue`` issue
+    rows all ran validly; else ``passed`` or ``failed``."""
     issue = [r for r in rows if r.get("kind") == "issue"]
     valid = [r for r in issue if _usable(r)]
-    per = [float(r["precision"]) for r in valid]
-    mean = sum(per) / len(per) if per else 0.0
+    per: list[float | None] = [float(r["precision"]) if r["n_pred"] else None for r in valid]
+    named = [p for p in per if p is not None]
+    mean = sum(named) / len(named) if named else 0.0
     n_pred = sum(r["n_pred"] for r in valid)
     pooled = sum(r["hit"] for r in valid) / n_pred if n_pred else 0.0
     if len(issue) != n_issue or len(valid) != n_issue:
         verdict = "invalid"
     else:
-        verdict = "passed" if mean >= threshold - 1e-9 else "failed"
+        verdict = "passed" if named and mean >= threshold - 1e-9 else "failed"
     return {"mean": mean, "pooled": pooled, "per_question": per, "n_issue": len(issue), "n_valid": len(valid),
+            "n_named": len(named), "n_left_out": len(per) - len(named),
             "threshold": threshold, "passed": verdict == "passed", "verdict": verdict}
 
 
@@ -1617,7 +1628,8 @@ def mvv_rungs(score: dict[str, Any]) -> list[dict[str, Any]]:
     read = "interpretable" if held["interpretable"] else "not interpretable: " + "; ".join(held["reasons"])
     rungs = [
         Rung("MVV", "join_completeness_both_runs", {"passed": 1.0, "failed": 0.0}.get(jc_v),
-             f">={DOMAIN_FLOOR} of {ISSUE_QUESTIONS} issue questions in the domain and every one passes, both runs",
+             f">={DOMAIN_FLOOR} of {ISSUE_QUESTIONS} issue questions in the domain, at most {MAX_DOMAIN_MISSES} "
+             f"failing, both runs",
              _VERDICT_STATUS[jc_v]),
         Rung("MVV", "precision_mean_both_runs", min(means) if len(means) == len(RUN_LABELS) else None,
              f">={PRECISION_GATE} in both runs", _VERDICT_STATUS[pr_v]),

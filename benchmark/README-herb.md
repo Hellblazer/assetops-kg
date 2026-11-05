@@ -141,14 +141,18 @@ Rules, as the code applies them (`join_completeness`, `precision_gate`, `score_m
    A question passes when its answer names every company those anchor ids give in the registry
    (`cust_to_company.json`, case-insensitive) and `resolution_entered` is true. Anchor ids the registry
    cannot map, or that nexus cut on the wire, do not pass. At least 4 of the 5 issue questions must be in
-   the domain in each run; fewer is a vacuous run and a fail. A usable question outside the domain says why
+   the domain in each run; fewer is a vacuous run and a fail. At most one in-domain question may fail per run
+   (Sam, 2026-11-05: the miss on 2026-11-05 was the re-check's variance on the same joined item). A usable question outside the domain says why
    (`domain_exclusion`): empty anchors beside evidence ids read "boundary not reached or branch not
    considered" with the plan and `resolution_reason`. An in-domain question carries a cause per anchor id
    (`id_causes`: resolved, missing, ambiguous, cap-dropped, unaccounted). Reported, never gated: completeness
    over all hydrated evidence ids, and a resolved-only completeness (companies of the resolved ids only), which
    separates cap and missing losses from answer-composition losses.
-6. **Precision (gated).** Per run, the mean over the 5 issue questions of per-question precision
-   (`score_set`), at least 0.95, in both runs. The pooled ratio and the per-question values are reported.
+6. **Precision (gated).** Per run, the mean of per-question precision (`score_set`) over the issue questions
+   whose answer named at least one company, at least 0.95, in both runs. A question that named none is left out
+   (Sam, 2026-11-05: precision of the named companies is undefined there, and join completeness already counts
+   the non-answer); a run where no question named one fails. The pooled ratio and the per-question values are
+   reported.
 7. **Three verdicts.** `passed`; `failed` (a run made of valid rows failed a gate: a finding about the branch);
    `invalid` (a run is missing, or a row did not run validly or was skipped: not a measurement, rerun with
    `--resume`, never a finding). A failed run on valid rows settles the gate even if the other run is
