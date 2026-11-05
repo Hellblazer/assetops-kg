@@ -1278,6 +1278,25 @@ class FakeLibrary:
 BUILTIN = {"id": 1, "tags": "builtin-template,lookup"}
 
 
+def test_a_snapshot_id_re_grown_by_the_call_itself_is_valid_and_grown_by_call():
+    """2026-11-05 held-out rows on plans 13 and 14: the ids were in the pre-run snapshot, but nexus wrote the rows
+    again during the call (created_at after the call's start). Sam 2026-11-04: a run on its own grown plan is valid."""
+    from datetime import datetime, timezone
+    started = datetime(2026, 11, 5, 21, 54, 30, tzinfo=timezone.utc)
+    lib = FakeLibrary([BUILTIN, {"id": 14, "tags": "ad-hoc,grown", "created_at": "2026-11-05T21:55:49Z"}])
+    assert herb_ladder.plan_validity(lib, 14, frozenset({1, 14}), started) == (True, "", True)
+
+
+def test_a_grown_plan_created_before_the_call_is_still_invalid():
+    from datetime import datetime, timezone
+    started = datetime(2026, 11, 5, 21, 54, 30, tzinfo=timezone.utc)
+    lib = FakeLibrary([BUILTIN, {"id": 14, "tags": "ad-hoc,grown", "created_at": "2026-11-05T21:40:00Z"}])
+    valid, why, grown = herb_ladder.plan_validity(lib, 14, frozenset({1, 14}), started)
+    assert valid is False and grown is False and "existed before the run" in why
+    lib = FakeLibrary([BUILTIN, {"id": 15, "tags": "ad-hoc,grown", "created_at": "not a time"}])
+    assert herb_ladder.plan_validity(lib, 15, frozenset({1, 15}), started)[0] is False   # unreadable: no pass
+
+
 def test_sweep_disables_every_grown_plan_once_and_leaves_templates():
     lib = FakeLibrary([BUILTIN, {"id": 7, "tags": "ad-hoc,grown"}, {"id": 9, "tags": "ad-hoc,grown"}])
     assert herb_ladder.sweep_grown_plans(lib).disabled == [7, 9]
