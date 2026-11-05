@@ -710,6 +710,18 @@ def _mvv_switches_on(monkeypatch):
     monkeypatch.delenv("NX_ANSWER_COVERAGE", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _mvv_llm_reachable(monkeypatch, tmp_path_factory):
+    """The MVV also refuses unless claude is on its PATH and the token is set (mvv_llm_violations): a stub
+    claude on a private PATH entry and a dummy token; the refusal tests remove them themselves."""
+    d = tmp_path_factory.mktemp("claude-bin")
+    stub = d / "claude"
+    stub.write_text("#!/bin/sh\nexit 0\n")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{d}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "test-token")
+
+
 def _qrow(i=1, *, kind="issue", named=("Acme",), gold=("Acme",), anchors=("CUST-1",), entered=True,
           valid=True, plan_id=None, evidence=(), label="a", **over):
     """One nx_answer row as run_nx_answer_rows writes it, built from fixture values. By default every
@@ -795,8 +807,10 @@ def test_repair_columns_turn_null_lists_into_empty_ones():
 # --- join completeness: gated, over anchor_key_ids ---
 
 
-def _jc(rows):
-    return herb_ladder.join_completeness(rows, REGISTRY)
+def _jc(rows, max_misses=0):
+    """Strict by default (no in-domain miss allowed), so one failing question shows as a failed run and the
+    question-level rules are pinned on their own; the one-miss tolerance is tested with max_misses=1 below."""
+    return herb_ladder.join_completeness(rows, REGISTRY, max_misses=max_misses)
 
 
 def test_completeness_passes_when_named_companies_are_a_superset():
@@ -973,6 +987,39 @@ def test_a_valid_run_whose_question_misses_a_company_is_failed():
     out = _jc([_qrow(1, named=("Acme",), anchors=("CUST-1", "CUST-2")), *_issue_rows()[1:]])
     assert out["verdict"] == "failed"
     assert _jc(_issue_rows())["verdict"] == "passed"
+
+
+def test_one_in_domain_miss_per_run_passes_and_two_fail():
+    """Sam 2026-11-05 (T2 nexus/rdr147-mvv-bar-revision-2026-11-05): at most one in-domain question may fail."""
+    one = [_qrow(1, named=(), anchors=("CUST-1",)), *_issue_rows()[1:]]
+    out = herb_ladder.join_completeness(one, REGISTRY)
+    assert out["verdict"] == "passed" and out["n_missed"] == 1 and out["max_misses"] == 1
+    assert "1 in-domain miss" in out["reason"]
+    two = [_qrow(1, named=(), anchors=("CUST-1",)), _qrow(2, entered=False), *_issue_rows()[2:]]
+    out = herb_ladder.join_completeness(two, REGISTRY)
+    assert out["verdict"] == "failed" and out["n_missed"] == 2 and "at most 1 allowed" in out["reason"]
+
+
+def test_the_miss_tolerance_does_not_lower_the_domain_floor():
+    rows = [_qrow(1, anchors=()), _qrow(2, anchors=()), *_issue_rows()[2:]]       # 3 in the domain, none failing
+    out = herb_ladder.join_completeness(rows, REGISTRY)
+    assert out["vacuous"] is True and out["verdict"] == "failed"
+
+
+def test_precision_leaves_out_a_question_that_named_no_company():
+    """Sam 2026-11-05: precision of the named companies is undefined for a non-answer, so it is left out."""
+    rows = [_qrow(1, named=()), *_issue_rows()[1:]]
+    pg = herb_ladder.precision_gate(rows)
+    assert pg["per_question"][0] is None and pg["n_named"] == 4 and pg["n_left_out"] == 1
+    assert pg["mean"] == pytest.approx(1.0) and pg["verdict"] == "passed"
+
+
+def test_precision_still_counts_a_wrong_company_and_fails_a_run_that_named_none():
+    wrong = [_qrow(1, named=("Acme", "Beta"), gold=("Acme",)), *_issue_rows()[1:]]   # 0.5 on one question
+    assert herb_ladder.precision_gate(wrong)["mean"] == pytest.approx((0.5 + 4) / 5)
+    none = [_qrow(i, named=()) for i in range(1, 6)]
+    pg = herb_ladder.precision_gate(none)
+    assert pg["n_named"] == 0 and pg["verdict"] == "failed"
 
 
 def test_a_vacuous_run_is_failed_not_invalid():
@@ -1832,11 +1879,12 @@ def test_invalid_rows_are_left_out_of_the_reported_figures():
 def test_the_scorecard_rungs_go_red_when_a_gate_fails():
     bad = _issue_rows(label="b")
     bad[0] = _qrow(1, named=("Acme", "Beta", "Gamma", "Delta"), label="b")        # precision 0.25 on one question
-    bad[1] = _qrow(2, entered=False, label="b")                                    # and a question that did not enter
+    bad[1] = _qrow(2, entered=False, label="b")                                    # a question that did not enter
+    bad[2] = _qrow(3, named=(), label="b")                                         # and a non-answer: two misses
     rungs = {r["metric"]: r for r in herb_ladder.mvv_rungs(_mvv(_issue_rows(label="a"), bad))}
     assert rungs["join_completeness_both_runs"]["status"] == "RED" and rungs["join_completeness_both_runs"]["value"] == 0.0
     assert rungs["precision_mean_both_runs"]["status"] == "RED"
-    assert rungs["precision_mean_both_runs"]["value"] == pytest.approx(0.85)
+    assert rungs["precision_mean_both_runs"]["value"] == pytest.approx((0.25 + 1 + 1 + 1) / 4)   # the non-answer left out
     good = {r["metric"]: r for r in herb_ladder.mvv_rungs(_mvv(_issue_rows(label="a"), _issue_rows(label="b")))}
     assert good["join_completeness_both_runs"]["status"] == good["precision_mean_both_runs"]["status"] == "GREEN"
 
@@ -1903,6 +1951,42 @@ def test_the_mvv_refuses_before_any_spend_when_the_switches_are_not_on(monkeypat
     with pytest.raises(herb_ladder.NxError, match="NX_ANSWER"):
         herb_ladder.run_mvv(_issue_qs(5), UNIVERSE, REGISTRY, [], 4.0, lib)
     assert ans.n == 0 and log == [] and not herb_ladder._COST_LEDGER.exists()   # no sweep, no run, no ledger row
+
+
+def test_llm_preflight_passes_with_claude_on_the_path_and_a_token(tmp_path):
+    (tmp_path / "claude").write_text("#!/bin/sh\n")
+    (tmp_path / "claude").chmod(0o755)
+    assert herb_ladder.mvv_llm_violations({"PATH": str(tmp_path), "CLAUDE_CODE_OAUTH_TOKEN": "t"}) == []
+
+
+def test_llm_preflight_names_a_missing_claude_and_a_missing_token_without_echoing_the_token(tmp_path):
+    bad = herb_ladder.mvv_llm_violations({"PATH": str(tmp_path), "CLAUDE_CODE_OAUTH_TOKEN": " "})
+    assert len(bad) == 2 and "claude is not on the PATH" in bad[0] and "CLAUDE_CODE_OAUTH_TOKEN" in bad[1]
+    secret = "sk-very-secret"
+    assert all(secret not in b for b in herb_ladder.mvv_llm_violations({"PATH": str(tmp_path),
+                                                                        "CLAUDE_CODE_OAUTH_TOKEN": secret}))
+
+
+def test_the_mvv_refuses_before_any_spend_when_claude_is_not_on_its_path(monkeypatch, tmp_path):
+    """The 2026-11-05 first MVV run: NX_BIN in a venv without claude, so nx_answer fell back to a single-step
+    template at exit 0 and every row read as a valid zero. The gate stops that before a sweep or a ledger row."""
+    monkeypatch.setenv("PATH", str(tmp_path))
+    log: list = []
+    lib = FakeLibrary([BUILTIN], log)
+    ans = FakeAnswer(lib, log)
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", ans)
+    with pytest.raises(herb_ladder.NxError, match="claude is not on the PATH"):
+        herb_ladder.run_mvv(_issue_qs(5), UNIVERSE, REGISTRY, [], 4.0, lib)
+    assert ans.n == 0 and log == [] and not herb_ladder._COST_LEDGER.exists()
+
+
+def test_emit_mvv_refuses_a_missing_token_before_it_reads_anything_or_touches_a_file(monkeypatch, tmp_path):
+    w = _emit_world(monkeypatch, tmp_path)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN")
+    monkeypatch.setattr(herb_ladder, "service_versions", lambda: pytest.fail("read the service before the gate"))
+    with pytest.raises(herb_ladder.NxError, match="CLAUDE_CODE_OAUTH_TOKEN"):
+        herb_ladder.emit_mvv(cap_usd=4.0, date=RUN_ID, plan_library=w.lib)
+    assert w.ans.n == 0 and not (w.results / f"mvv-{RUN_ID}.jsonl").exists()
 
 
 def test_emit_mvv_refuses_a_switch_that_is_off_before_it_reads_anything_or_touches_a_file(monkeypatch, tmp_path):
@@ -2565,8 +2649,9 @@ def test_the_readme_resume_command_carries_the_whole_sandbox_wrapper():
 
 def test_the_readme_says_the_cap_is_per_run_date_and_cap_usd_overrides_it():
     text = _readme()
-    assert "The 4 USD cap is per run date: a `--resume` with another DATE, or a row file moved aside, starts a " \
-           "fresh cap, and `--cap-usd` overrides the cap itself." in text
+    assert "A `--resume` with another DATE starts a fresh cap; a row file moved aside does not (the ledger still " \
+           "holds the date's charges). `--cap-usd` overrides the cap itself." in text
+    assert "or a row file moved aside, starts a fresh cap" not in text
     assert "(cap 4 USD per run date, `MVV_CAP_USD`)" in text and "cap 4 USD total" not in text
 
 

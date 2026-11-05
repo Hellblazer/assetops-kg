@@ -38,7 +38,8 @@
 # The nx_answer switches NX_ANSWER_RESOLUTION_REPAIR (the RDR-147 resolution branch, off unless on) and
 # NX_ANSWER_COVERAGE pass through the allowlist when set; nexus reads them from the environment only.
 #
-# Overrides: HERB_SANDBOX_DIR (default <repo>/.herb-sandbox), NX_BIN (default: nx on PATH),
+# Overrides: HERB_SANDBOX_DIR (default <repo>/.herb-sandbox), NX_BIN (default: nx on PATH), CLAUDE_BIN
+# (default: claude on PATH; joins the sandbox PATH only with HERB_SANDBOX_LLM=1),
 # NX_PYTHON (default: the installed nx's interpreter; the P2 rung refuses that one, see README-herb.md),
 # HERB_NEXUS_REV (nexus git revision under test; passed through, required by the P2 rung).
 set -euo pipefail
@@ -80,10 +81,18 @@ _sandbox_env() {
   # The caller's python3 (it carries the harness deps, rich and pytest), not whichever the bare
   # sandbox PATH finds first.
   py_dir="$(dirname "$(command -v python3)")"
+  # nx_answer runs claude: with HERB_SANDBOX_LLM=1 its directory joins the PATH, resolved from the caller's
+  # PATH (CLAUDE_BIN overrides). Without it nexus does not fail: a single-step template answers with a raw
+  # listing and every MVV row is a valid-looking zero (2026-11-05, NX_BIN in a venv without claude).
+  local claude_dir=""
+  if [ "${HERB_SANDBOX_LLM:-0}" = 1 ]; then
+    local claude_bin="${CLAUDE_BIN:-$(command -v claude || true)}"
+    if [ -n "$claude_bin" ] && [ -x "$claude_bin" ]; then claude_dir="$(dirname "$claude_bin"):"; fi
+  fi
   local e=(
     "HOME=$SB_HOME"
     "NEXUS_CONFIG_DIR=$SB_CFG"
-    "PATH=$py_dir:$nx_dir:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+    "PATH=$py_dir:$nx_dir:${claude_dir}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
     "TERM=${TERM:-dumb}"
     "NX_LOCAL=1"
     "NX_NO_TELEMETRY=1"
@@ -208,6 +217,13 @@ cmd_self_test() {
   out="$(HERB_SANDBOX_LLM=1 _sandbox_env | tr '\0' '\n')"
   grep -q "^CLAUDE_CODE_OAUTH_TOKEN=" <<<"$out" || { echo "FAIL: token not passed with HERB_SANDBOX_LLM=1"; fail=1; }
   if grep -q "^VOYAGE_API_KEY=" <<<"$out"; then echo "FAIL: voyage key leaked"; fail=1; fi
+  local cdir
+  cdir="$(mktemp -d)"; printf '#!/bin/sh\n' >"$cdir/claude"; chmod +x "$cdir/claude"
+  out="$(HERB_SANDBOX_LLM=1 CLAUDE_BIN="$cdir/claude" _sandbox_env | tr '\0' '\n')"
+  grep -q "^PATH=.*:$cdir:" <<<"$out" || { echo "FAIL: claude dir not on PATH with HERB_SANDBOX_LLM=1"; fail=1; }
+  out="$( (unset HERB_SANDBOX_LLM; CLAUDE_BIN="$cdir/claude" _sandbox_env | tr '\0' '\n') )"
+  if grep -q "^PATH=.*:$cdir:" <<<"$out"; then echo "FAIL: claude dir on PATH without HERB_SANDBOX_LLM"; fail=1; fi
+  rm -rf "$cdir"
   for ok in 127.0.0.1 localhost; do _assert_loopback "http://$ok:1234" || { echo "FAIL: loopback $ok"; fail=1; }; done
   if _assert_loopback "https://api.conexus-nexus.com"; then echo "FAIL: managed URL passed loopback"; fail=1; fi
   if (SB="$REAL_HOME"; _assert_sandbox_path) 2>/dev/null; then echo "FAIL: real HOME accepted as sandbox"; fail=1; fi
