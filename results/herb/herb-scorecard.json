@@ -28,7 +28,7 @@
       "MVV": {
         "by": "--mvv",
         "file": "mvv-2026-11-05.json",
-        "timestamp_utc": "2026-11-05T16:05:30.816647+00:00",
+        "timestamp_utc": "2026-11-05T21:45:07.226028+00:00",
         "verdict": "failed",
         "nexus_revision": "2d01960f4",
         "nx_version": "nx, version 7.95.1",
@@ -112,41 +112,41 @@
       "phase": "MVV",
       "metric": "join_completeness_both_runs",
       "value": 0.0,
-      "target": ">=4 of 5 issue questions in the domain and every one passes, both runs",
+      "target": ">=4 of 5 issue questions in the domain, at most 1 failing, both runs",
       "status": "RED"
     },
     {
       "phase": "MVV",
       "metric": "precision_mean_both_runs",
-      "value": 0.6,
+      "value": 1.0,
       "target": ">=0.95 in both runs",
-      "status": "RED"
+      "status": "GREEN"
     },
     {
       "phase": "MVV",
       "metric": "heldout_branch_entered",
       "value": 0.0,
-      "target": "report (0 entered of 20 valid of 20 asked; interpretable)",
+      "target": "report (0 entered of 18 valid of 20 asked; interpretable)",
       "status": "BASELINE"
     },
     {
       "phase": "MVV",
       "metric": "issue_branch_entered[a]",
-      "value": 0.8,
+      "value": 0.6,
       "target": "report",
       "status": "BASELINE"
     },
     {
       "phase": "MVV",
       "metric": "issue5_recall[a]",
-      "value": 0.4066666666666666,
+      "value": 0.10666666666666666,
       "target": "report",
       "status": "BASELINE"
     },
     {
       "phase": "MVV",
       "metric": "issue5_f1[a]",
-      "value": 0.5,
+      "value": 0.16666666666666669,
       "target": "report",
       "status": "BASELINE"
     },
@@ -181,14 +181,14 @@
     {
       "phase": "MVV",
       "metric": "issue5_recall[b]",
-      "value": 0.36666666666666664,
+      "value": 0.26666666666666666,
       "target": "report",
       "status": "BASELINE"
     },
     {
       "phase": "MVV",
       "metric": "issue5_f1[b]",
-      "value": 0.4333333333333333,
+      "value": 0.3,
       "target": "report",
       "status": "BASELINE"
     },
@@ -249,13 +249,15 @@
         "run_label": "a",
         "join_completeness": {
           "n_issue": 5,
-          "in_domain": 4,
+          "in_domain": 3,
           "floor": 4,
-          "vacuous": false,
+          "vacuous": true,
           "n_invalid": 0,
-          "passed": true,
-          "verdict": "passed",
-          "reason": "",
+          "n_missed": 1,
+          "max_misses": 1,
+          "passed": false,
+          "verdict": "failed",
+          "reason": "vacuous: 3 of 5 issue questions in the domain, floor 4",
           "questions": [
             {
               "question": "Find the names of companies were affected by issues in the AI Model & Search Algorithm in SearchFlow that caused decreased search accuracy and disrupted workflow?",
@@ -365,64 +367,28 @@
             },
             {
               "question": "Find the names of companies were affected by issues in the Search API of SearchFlow that posed security risks and potential data breaches?",
-              "in_domain": true,
+              "in_domain": false,
               "valid": true,
-              "resolution_entered": true,
-              "anchor_key_ids": [
-                "CUST-0049",
-                "CUST-0089",
-                "CUST-0079",
-                "CUST-0107"
-              ],
-              "anchor_companies": [
-                "ComputeWorks",
-                "DataSolutions",
-                "FusionTech"
-              ],
-              "named": [
-                "computeworks",
-                "datasolutions",
-                "fusiontech"
-              ],
+              "resolution_entered": false,
+              "anchor_key_ids": [],
+              "anchor_companies": [],
+              "named": [],
               "missing_companies": [],
-              "complete": true,
-              "passed": true,
-              "reason": "",
-              "id_causes": {
-                "CUST-0049": {
-                  "cause": "resolved",
-                  "company": "DataSolutions",
-                  "named": true,
-                  "dropped": []
-                },
-                "CUST-0089": {
-                  "cause": "resolved",
-                  "company": "DataSolutions",
-                  "named": true,
-                  "dropped": []
-                },
-                "CUST-0079": {
-                  "cause": "resolved",
-                  "company": "ComputeWorks",
-                  "named": true,
-                  "dropped": []
-                },
-                "CUST-0107": {
-                  "cause": "resolved",
-                  "company": "FusionTech",
-                  "named": true,
-                  "dropped": []
-                }
+              "complete": false,
+              "passed": false,
+              "reason": "outside the domain: no anchor ids, but the evidence holds 6 id(s) (boundary not reached or branch not considered; plan_id=7, resolution_reason='', anchors_scanned=0, anchors_without_pattern=0)",
+              "id_causes": {},
+              "domain_exclusion": {
+                "evidence_holds_ids": true,
+                "plan_id": 7,
+                "resolution_reason": "",
+                "anchors_scanned": 0,
+                "anchors_without_pattern": 0
               },
-              "domain_exclusion": null,
               "resolved_only": {
-                "companies": [
-                  "ComputeWorks",
-                  "DataSolutions",
-                  "FusionTech"
-                ],
+                "companies": [],
                 "missing_companies": [],
-                "complete": true
+                "complete": false
               }
             },
             {
@@ -438,25 +404,25 @@
                 "ComputeWorks",
                 "FusionTech"
               ],
-              "named": [
-                "computeworks",
-                "fusiontech"
+              "named": [],
+              "missing_companies": [
+                "ComputeWorks",
+                "FusionTech"
               ],
-              "missing_companies": [],
-              "complete": true,
-              "passed": true,
-              "reason": "",
+              "complete": false,
+              "passed": false,
+              "reason": "answer does not name ['ComputeWorks', 'FusionTech']",
               "id_causes": {
                 "CUST-0115": {
                   "cause": "resolved",
                   "company": "ComputeWorks",
-                  "named": true,
+                  "named": false,
                   "dropped": []
                 },
                 "CUST-0036": {
                   "cause": "resolved",
                   "company": "FusionTech",
-                  "named": true,
+                  "named": false,
                   "dropped": []
                 }
               },
@@ -466,15 +432,18 @@
                   "ComputeWorks",
                   "FusionTech"
                 ],
-                "missing_companies": [],
-                "complete": true
+                "missing_companies": [
+                  "ComputeWorks",
+                  "FusionTech"
+                ],
+                "complete": false
               }
             }
           ],
-          "excluded_with_evidence_ids": 1,
+          "excluded_with_evidence_ids": 2,
           "resolved_only_completeness": {
-            "n_in_domain": 4,
-            "n_complete": 4,
+            "n_in_domain": 3,
+            "n_complete": 2,
             "gated": false
           },
           "evidence_completeness": {
@@ -550,17 +519,16 @@
               },
               {
                 "question": "Find the names of companies were affected by issues in the Search API of SearchFlow that posed security risks and potential data breaches?",
-                "n_evidence_ids": 8,
+                "n_evidence_ids": 6,
                 "evidence_companies": [
-                  "CloudSync",
                   "ComputeWorks",
                   "DataSolutions",
-                  "FusionTech",
-                  "SmartData"
+                  "FusionTech"
                 ],
                 "missing_companies": [
-                  "CloudSync",
-                  "SmartData"
+                  "ComputeWorks",
+                  "DataSolutions",
+                  "FusionTech"
                 ],
                 "complete": false
               },
@@ -576,7 +544,9 @@
                 ],
                 "missing_companies": [
                   "CloudSync",
+                  "ComputeWorks",
                   "DataSolutions",
+                  "FusionTech",
                   "SmartData"
                 ],
                 "complete": false
@@ -586,36 +556,38 @@
           }
         },
         "precision": {
-          "mean": 0.8,
+          "mean": 1.0,
           "pooled": 1.0,
           "per_question": [
             1.0,
-            0.0,
+            null,
             1.0,
-            1.0,
-            1.0
+            null,
+            null
           ],
           "n_issue": 5,
           "n_valid": 5,
+          "n_named": 2,
+          "n_left_out": 3,
           "threshold": 0.95,
-          "passed": false,
-          "verdict": "failed"
+          "passed": true,
+          "verdict": "passed"
         },
         "verdict": "failed",
         "n_invalid": 0,
-        "issue_entered": 4,
+        "issue_entered": 3,
         "summary": {
           "all7": {
             "n": 7,
-            "recall": 0.29047619047619044,
-            "precision": 0.5714285714285714,
-            "f1": 0.35714285714285715
+            "recall": 0.07619047619047618,
+            "precision": 0.2857142857142857,
+            "f1": 0.11904761904761905
           },
           "issue5": {
             "n": 5,
-            "recall": 0.4066666666666666,
-            "precision": 0.8,
-            "f1": 0.5
+            "recall": 0.10666666666666666,
+            "precision": 0.4,
+            "f1": 0.16666666666666669
           },
           "agg2": {
             "n": 2,
@@ -624,9 +596,9 @@
             "f1": 0.0
           }
         },
-        "issue5_recall": 0.4066666666666666,
-        "issue5_precision": 0.8,
-        "issue5_f1": 0.5,
+        "issue5_recall": 0.10666666666666666,
+        "issue5_precision": 0.4,
+        "issue5_f1": 0.16666666666666669,
         "agg2": {
           "n": 2,
           "recall": 0.0,
@@ -643,9 +615,11 @@
           "floor": 4,
           "vacuous": false,
           "n_invalid": 0,
+          "n_missed": 2,
+          "max_misses": 1,
           "passed": false,
           "verdict": "failed",
-          "reason": "an in-domain question failed",
+          "reason": "2 in-domain question(s) failed, at most 1 allowed",
           "questions": [
             {
               "question": "Find the names of companies were affected by issues in the AI Model & Search Algorithm in SearchFlow that caused decreased search accuracy and disrupted workflow?",
@@ -830,25 +804,25 @@
                 "ComputeWorks",
                 "FusionTech"
               ],
-              "named": [
-                "computeworks",
-                "fusiontech"
+              "named": [],
+              "missing_companies": [
+                "ComputeWorks",
+                "FusionTech"
               ],
-              "missing_companies": [],
-              "complete": true,
-              "passed": true,
-              "reason": "",
+              "complete": false,
+              "passed": false,
+              "reason": "answer does not name ['ComputeWorks', 'FusionTech']",
               "id_causes": {
                 "CUST-0115": {
                   "cause": "resolved",
                   "company": "ComputeWorks",
-                  "named": true,
+                  "named": false,
                   "dropped": []
                 },
                 "CUST-0036": {
                   "cause": "resolved",
                   "company": "FusionTech",
-                  "named": true,
+                  "named": false,
                   "dropped": []
                 }
               },
@@ -858,15 +832,18 @@
                   "ComputeWorks",
                   "FusionTech"
                 ],
-                "missing_companies": [],
-                "complete": true
+                "missing_companies": [
+                  "ComputeWorks",
+                  "FusionTech"
+                ],
+                "complete": false
               }
             }
           ],
           "excluded_with_evidence_ids": 1,
           "resolved_only_completeness": {
             "n_in_domain": 4,
-            "n_complete": 3,
+            "n_complete": 2,
             "gated": false
           },
           "evidence_completeness": {
@@ -969,7 +946,9 @@
                 ],
                 "missing_companies": [
                   "CloudSync",
+                  "ComputeWorks",
                   "DataSolutions",
+                  "FusionTech",
                   "SmartData"
                 ],
                 "complete": false
@@ -979,20 +958,22 @@
           }
         },
         "precision": {
-          "mean": 0.6,
+          "mean": 1.0,
           "pooled": 1.0,
           "per_question": [
             1.0,
-            0.0,
-            0.0,
+            null,
+            null,
             1.0,
-            1.0
+            null
           ],
           "n_issue": 5,
           "n_valid": 5,
+          "n_named": 2,
+          "n_left_out": 3,
           "threshold": 0.95,
-          "passed": false,
-          "verdict": "failed"
+          "passed": true,
+          "verdict": "passed"
         },
         "verdict": "failed",
         "n_invalid": 0,
@@ -1000,15 +981,15 @@
         "summary": {
           "all7": {
             "n": 7,
-            "recall": 0.2619047619047619,
-            "precision": 0.42857142857142855,
-            "f1": 0.3095238095238095
+            "recall": 0.19047619047619047,
+            "precision": 0.2857142857142857,
+            "f1": 0.21428571428571427
           },
           "issue5": {
             "n": 5,
-            "recall": 0.36666666666666664,
-            "precision": 0.6,
-            "f1": 0.4333333333333333
+            "recall": 0.26666666666666666,
+            "precision": 0.4,
+            "f1": 0.3
           },
           "agg2": {
             "n": 2,
@@ -1017,9 +998,9 @@
             "f1": 0.0
           }
         },
-        "issue5_recall": 0.36666666666666664,
-        "issue5_precision": 0.6,
-        "issue5_f1": 0.4333333333333333,
+        "issue5_recall": 0.26666666666666666,
+        "issue5_precision": 0.4,
+        "issue5_f1": 0.3,
         "agg2": {
           "n": 2,
           "recall": 0.0,
@@ -1032,62 +1013,62 @@
     "verdict": "failed",
     "passed": false,
     "join_completeness_verdict": "failed",
-    "precision_verdict": "failed",
+    "precision_verdict": "passed",
     "join_completeness_passed": false,
-    "precision_passed": false,
+    "precision_passed": true,
     "script_issue5_f1": 0.7642857142857142,
     "heldout": {
       "asked": 20,
       "n": 20,
-      "n_valid": 20,
+      "n_valid": 18,
       "n_skipped": 0,
-      "n_invalid": 0,
+      "n_invalid": 2,
       "entered": 0,
       "not_entered_reasons": {
-        "not_attempted": 9,
-        "no_key_tokens": 11
+        "no_key_tokens": 11,
+        "not_attempted": 7
       },
       "interpretable": true,
       "reasons": []
     },
     "run": {
-      "cap_usd": 8.0,
-      "total_cost_usd": 1.010959,
-      "cumulative_cost_usd": 5.010959,
+      "cap_usd": 7.0,
+      "total_cost_usd": 0.962867,
+      "cumulative_cost_usd": 5.973826,
       "nx_answer": {
-        "total_cost_usd": 0.317806,
-        "cumulative_cost_usd": 4.317806,
-        "cap_usd": 8.0,
+        "total_cost_usd": 0.264462,
+        "cumulative_cost_usd": 5.275421,
+        "cap_usd": 7.0,
         "runs_with_unknown_cost": 0,
         "complete": true,
         "by_run": {
           "a": {
-            "total_cost_usd": 0.247671,
-            "cumulative_cost_usd": 4.247671,
-            "cap_usd": 8.0,
+            "total_cost_usd": 0.133269,
+            "cumulative_cost_usd": 5.144228,
+            "cap_usd": 7.0,
             "runs_with_unknown_cost": 0,
             "complete": true
           },
           "b": {
-            "total_cost_usd": 0.070136,
-            "cumulative_cost_usd": 4.317806,
-            "cap_usd": 8.0,
+            "total_cost_usd": 0.131193,
+            "cumulative_cost_usd": 5.275421,
+            "cap_usd": 7.0,
             "runs_with_unknown_cost": 0,
             "complete": true
           }
         }
       },
       "heldout": {
-        "total_cost_usd": 0.693152,
-        "cumulative_cost_usd": 5.010959,
-        "cap_usd": 8.0,
+        "total_cost_usd": 0.698405,
+        "cumulative_cost_usd": 5.973826,
+        "cap_usd": 7.0,
         "runs_with_unknown_cost": 0,
         "complete": true
       },
       "complete": true,
       "run_id": "2026-11-05",
-      "timestamp_utc": "2026-11-05T16:05:30.816647+00:00",
-      "resumed": true,
+      "timestamp_utc": "2026-11-05T21:45:07.226028+00:00",
+      "resumed": false,
       "nexus_revision": "2d01960f4",
       "nx_version": "nx, version 7.95.1",
       "engine_release_version": "0.1.179",
