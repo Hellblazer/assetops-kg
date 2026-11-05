@@ -764,7 +764,7 @@ def test_repair_columns_copy_the_report_fields():
         "joined_dropped": ["CUST-1@h9:no_text"], "tokens_dropped": ["CUST-9"],
         "anchors_scanned": 4, "anchors_without_pattern": 1,
         "anchor_key_ids_truncated": 6, "resolved_truncated": 1, "missing_truncated": 2, "ambiguous_truncated": 3,
-        "joined_dropped_truncated": 4, "tokens_dropped_truncated": 5}
+        "joined_dropped_truncated": 4, "tokens_dropped_truncated": 5, "generated_on_join": False}
 
 
 def test_repair_columns_carry_the_reason_a_considered_branch_did_not_enter():
@@ -987,6 +987,29 @@ def test_a_valid_run_whose_question_misses_a_company_is_failed():
     out = _jc([_qrow(1, named=("Acme",), anchors=("CUST-1", "CUST-2")), *_issue_rows()[1:]])
     assert out["verdict"] == "failed"
     assert _jc(_issue_rows())["verdict"] == "passed"
+
+
+def test_repair_columns_read_generated_on_join_only_as_a_boolean_true():
+    assert herb_ladder.repair_columns({"generated_on_join": True})["generated_on_join"] is True
+    for v in (None, "true", 1, False):
+        assert herb_ladder.repair_columns({"generated_on_join": v})["generated_on_join"] is False
+
+
+def test_precision_is_reported_split_by_generated_on_join_and_the_split_is_not_gated():
+    rows = [_qrow(1, named=("Acme", "Beta"), gold=("Acme",), generated_on_join=True), *_issue_rows()[1:]]
+    pg = herb_ladder.precision_gate(rows)
+    assert pg["split"]["generated_on_join"] == {"n": 1, "mean": pytest.approx(0.5)}
+    assert pg["split"]["rechecked"] == {"n": 4, "mean": pytest.approx(1.0)}
+    assert pg["mean"] == pytest.approx(0.9) and pg["verdict"] == "failed"    # the gate is still the plain mean
+
+
+def test_heldout_counts_answered_outcomes_and_answers_on_a_join():
+    rows = [{"valid": True, "final_text": "[non-answer: uncovered] x", "resolution_entered": False},
+            {"valid": True, "final_text": "Some answer", "resolution_entered": False},
+            {"valid": True, "final_text": "[exact-key join: 1 record(s) ...]\nAn answer", "resolution_entered": True,
+             "generated_on_join": True}]
+    rep = herb_ladder.heldout_report(rows, {"a": {"issue_entered": 1}, "b": {"issue_entered": 1}})
+    assert rep["answered"] == 2 and rep["answered_on_join"] == 1 and rep["entered"] == 1
 
 
 def test_one_in_domain_miss_per_run_passes_and_two_fail():

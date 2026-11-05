@@ -146,7 +146,7 @@ REPAIR_FIELDS = ("resolution_entered", "resolution_reason", "resolution_tokens",
                  "missing", "ambiguous", "joined_added", "items_merged", "repair_outcome", "joined_dropped",
                  "tokens_dropped", "anchors_scanned", "anchors_without_pattern", "anchor_key_ids_truncated",
                  "resolved_truncated", "missing_truncated", "ambiguous_truncated", "joined_dropped_truncated",
-                 "tokens_dropped_truncated")
+                 "tokens_dropped_truncated", "generated_on_join")
 _TRUNCATED_LISTS = ("anchor_key_ids", "resolved", "missing", "ambiguous", "joined_dropped", "tokens_dropped")
 MVV_LEDGER_LABEL = "mvv"         # every MVV call's cost-ledger label (nexus-irndi); the stage is beside it
 PER_CALL_BUDGET_USD = 0.5        # nx_answer's soft per-call budget; also what a call of unknown cost is charged
@@ -1022,6 +1022,8 @@ def repair_columns(report: Any) -> dict[str, Any]:
         "tokens_dropped": [str(x) for x in listy(rep.get("tokens_dropped"))],
         "anchors_scanned": count(rep.get("anchors_scanned")),
         "anchors_without_pattern": count(rep.get("anchors_without_pattern")),
+        # RDR-147 option 1 (Sam 2026-11-05): the answer was generated on an exact-key join the re-check did not cover
+        "generated_on_join": rep.get("generated_on_join") is True,
     }
     for name in _TRUNCATED_LISTS:
         cols[f"{name}_truncated"] = count(rep.get(f"{name}_truncated"))
@@ -1422,8 +1424,13 @@ def precision_gate(rows: list[dict[str, Any]], threshold: float = PRECISION_GATE
         verdict = "invalid"
     else:
         verdict = "passed" if named and mean >= threshold - 1e-9 else "failed"
+    # Reported, never gated (RDR-147 R9): precision of the answers only option 1 admitted, beside the rest.
+    split: dict[str, dict[str, Any]] = {}
+    for key, pick in (("generated_on_join", True), ("rechecked", False)):
+        vals = [float(r["precision"]) for r in valid if r["n_pred"] and (r.get("generated_on_join") is True) is pick]
+        split[key] = {"n": len(vals), "mean": sum(vals) / len(vals) if vals else None}
     return {"mean": mean, "pooled": pooled, "per_question": per, "n_issue": len(issue), "n_valid": len(valid),
-            "n_named": len(named), "n_left_out": len(per) - len(named),
+            "n_named": len(named), "n_left_out": len(per) - len(named), "split": split,
             "threshold": threshold, "passed": verdict == "passed", "verdict": verdict}
 
 
@@ -1455,6 +1462,9 @@ def heldout_report(rows: list[dict[str, Any]], runs: Mapping[str, Any], n_asked:
             "n_skipped": sum(1 for r in rows if r.get("skipped")),
             "n_invalid": sum(1 for r in rows if not _usable(r) and not r.get("skipped")),
             "entered": sum(1 for r in valid if r.get("resolution_entered") is True),
+            # RDR-147 R9: an entered join now answers; count answered held-out outcomes, not firings only
+            "answered": sum(1 for r in valid if not str(r.get("final_text") or "").startswith("[non-answer:")),
+            "answered_on_join": sum(1 for r in valid if r.get("generated_on_join") is True),
             "not_entered_reasons": not_entered, "interpretable": not reasons, "reasons": reasons}
 
 
