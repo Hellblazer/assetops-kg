@@ -710,6 +710,18 @@ def _mvv_switches_on(monkeypatch):
     monkeypatch.delenv("NX_ANSWER_COVERAGE", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _mvv_llm_reachable(monkeypatch, tmp_path_factory):
+    """The MVV also refuses unless claude is on its PATH and the token is set (mvv_llm_violations): a stub
+    claude on a private PATH entry and a dummy token; the refusal tests remove them themselves."""
+    d = tmp_path_factory.mktemp("claude-bin")
+    stub = d / "claude"
+    stub.write_text("#!/bin/sh\nexit 0\n")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{d}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "test-token")
+
+
 def _qrow(i=1, *, kind="issue", named=("Acme",), gold=("Acme",), anchors=("CUST-1",), entered=True,
           valid=True, plan_id=None, evidence=(), label="a", **over):
     """One nx_answer row as run_nx_answer_rows writes it, built from fixture values. By default every
@@ -1905,6 +1917,42 @@ def test_the_mvv_refuses_before_any_spend_when_the_switches_are_not_on(monkeypat
     assert ans.n == 0 and log == [] and not herb_ladder._COST_LEDGER.exists()   # no sweep, no run, no ledger row
 
 
+def test_llm_preflight_passes_with_claude_on_the_path_and_a_token(tmp_path):
+    (tmp_path / "claude").write_text("#!/bin/sh\n")
+    (tmp_path / "claude").chmod(0o755)
+    assert herb_ladder.mvv_llm_violations({"PATH": str(tmp_path), "CLAUDE_CODE_OAUTH_TOKEN": "t"}) == []
+
+
+def test_llm_preflight_names_a_missing_claude_and_a_missing_token_without_echoing_the_token(tmp_path):
+    bad = herb_ladder.mvv_llm_violations({"PATH": str(tmp_path), "CLAUDE_CODE_OAUTH_TOKEN": " "})
+    assert len(bad) == 2 and "claude is not on the PATH" in bad[0] and "CLAUDE_CODE_OAUTH_TOKEN" in bad[1]
+    secret = "sk-very-secret"
+    assert all(secret not in b for b in herb_ladder.mvv_llm_violations({"PATH": str(tmp_path),
+                                                                        "CLAUDE_CODE_OAUTH_TOKEN": secret}))
+
+
+def test_the_mvv_refuses_before_any_spend_when_claude_is_not_on_its_path(monkeypatch, tmp_path):
+    """The 2026-11-05 first MVV run: NX_BIN in a venv without claude, so nx_answer fell back to a single-step
+    template at exit 0 and every row read as a valid zero. The gate stops that before a sweep or a ledger row."""
+    monkeypatch.setenv("PATH", str(tmp_path))
+    log: list = []
+    lib = FakeLibrary([BUILTIN], log)
+    ans = FakeAnswer(lib, log)
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", ans)
+    with pytest.raises(herb_ladder.NxError, match="claude is not on the PATH"):
+        herb_ladder.run_mvv(_issue_qs(5), UNIVERSE, REGISTRY, [], 4.0, lib)
+    assert ans.n == 0 and log == [] and not herb_ladder._COST_LEDGER.exists()
+
+
+def test_emit_mvv_refuses_a_missing_token_before_it_reads_anything_or_touches_a_file(monkeypatch, tmp_path):
+    w = _emit_world(monkeypatch, tmp_path)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN")
+    monkeypatch.setattr(herb_ladder, "service_versions", lambda: pytest.fail("read the service before the gate"))
+    with pytest.raises(herb_ladder.NxError, match="CLAUDE_CODE_OAUTH_TOKEN"):
+        herb_ladder.emit_mvv(cap_usd=4.0, date=RUN_ID, plan_library=w.lib)
+    assert w.ans.n == 0 and not (w.results / f"mvv-{RUN_ID}.jsonl").exists()
+
+
 def test_emit_mvv_refuses_a_switch_that_is_off_before_it_reads_anything_or_touches_a_file(monkeypatch, tmp_path):
     w = _emit_world(monkeypatch, tmp_path)
     monkeypatch.delenv("NX_ANSWER_RESOLUTION_REPAIR")
@@ -2565,8 +2613,9 @@ def test_the_readme_resume_command_carries_the_whole_sandbox_wrapper():
 
 def test_the_readme_says_the_cap_is_per_run_date_and_cap_usd_overrides_it():
     text = _readme()
-    assert "The 4 USD cap is per run date: a `--resume` with another DATE, or a row file moved aside, starts a " \
-           "fresh cap, and `--cap-usd` overrides the cap itself." in text
+    assert "A `--resume` with another DATE starts a fresh cap; a row file moved aside does not (the ledger still " \
+           "holds the date's charges). `--cap-usd` overrides the cap itself." in text
+    assert "or a row file moved aside, starts a fresh cap" not in text
     assert "(cap 4 USD per run date, `MVV_CAP_USD`)" in text and "cap 4 USD total" not in text
 
 
