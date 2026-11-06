@@ -146,7 +146,7 @@ REPAIR_FIELDS = ("resolution_entered", "resolution_reason", "resolution_tokens",
                  "missing", "ambiguous", "joined_added", "items_merged", "repair_outcome", "joined_dropped",
                  "tokens_dropped", "anchors_scanned", "anchors_without_pattern", "anchor_key_ids_truncated",
                  "resolved_truncated", "missing_truncated", "ambiguous_truncated", "joined_dropped_truncated",
-                 "tokens_dropped_truncated")
+                 "tokens_dropped_truncated", "generated_on_join")
 _TRUNCATED_LISTS = ("anchor_key_ids", "resolved", "missing", "ambiguous", "joined_dropped", "tokens_dropped")
 MVV_LEDGER_LABEL = "mvv"         # every MVV call's cost-ledger label (nexus-irndi); the stage is beside it
 PER_CALL_BUDGET_USD = 0.5        # nx_answer's soft per-call budget; also what a call of unknown cost is charged
@@ -921,13 +921,29 @@ def sweep_grown_plans(library: Any, reason: str = GROWN_PLAN_REASON) -> Sweep:
     return Sweep([r["id"] for r in records], records, snapshot)
 
 
-def plan_validity(library: Any, plan_id: Any, snapshot: frozenset[int]) -> tuple[bool, str, bool]:
+def _created_at(row: Mapping[str, Any]) -> datetime | None:
+    """A plan row's ``created_at`` as an aware datetime, or None when it is absent or unreadable."""
+    raw = row.get("created_at")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        at = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return at if at.tzinfo else at.replace(tzinfo=timezone.utc)
+
+
+def plan_validity(library: Any, plan_id: Any, snapshot: frozenset[int],
+                  started_at: datetime | None = None) -> tuple[bool, str, bool]:
     """(valid, reason, grown_by_call) for a run that reports *plan_id*, given the pre-run *snapshot* of plan ids.
 
     No plan row (``None``, or ``0``: nexus saved nothing) is valid. An id absent from the snapshot was created
     by this very call (the inline planner grew and saved it): valid, ``grown_by_call``. An id in the snapshot
-    is read back: a grown or user plan is invalid (the sweep should have disabled it), a row that cannot be
-    read is invalid, a curated template is valid. An id that is not an integer is invalid."""
+    is read back: a row created at or after *started_at* was written by this very call (nexus re-grows a plan
+    under an id it already had: the 2026-11-05 held-out rows on plans 13 and 14, created during their own
+    calls), valid and ``grown_by_call``; otherwise a grown or user plan is invalid (the sweep should have
+    disabled it), a row that cannot be read is invalid, a curated template is valid. An id that is not an
+    integer is invalid."""
     if plan_id is None:
         return True, "", False
     if isinstance(plan_id, bool) or not isinstance(plan_id, int) or plan_id < 0:
@@ -939,6 +955,9 @@ def plan_validity(library: Any, plan_id: Any, snapshot: frozenset[int]) -> tuple
     row = library.get_plan(plan_id)
     if row is None:
         return False, f"plan row {plan_id} not found: the run cannot be shown to be off a grown plan", False
+    created = _created_at(row)
+    if started_at is not None and created is not None and created >= started_at:
+        return True, "", True
     if plan_is_grown(row):
         return False, f"run on grown plan {plan_id} (it existed before the run: the sweep should have disabled it)", False
     return True, "", False
@@ -1003,6 +1022,8 @@ def repair_columns(report: Any) -> dict[str, Any]:
         "tokens_dropped": [str(x) for x in listy(rep.get("tokens_dropped"))],
         "anchors_scanned": count(rep.get("anchors_scanned")),
         "anchors_without_pattern": count(rep.get("anchors_without_pattern")),
+        # RDR-147 option 1 (Sam 2026-11-05): the answer was generated on an exact-key join the re-check did not cover
+        "generated_on_join": rep.get("generated_on_join") is True,
     }
     for name in _TRUNCATED_LISTS:
         cols[f"{name}_truncated"] = count(rep.get(f"{name}_truncated"))
@@ -1035,6 +1056,8 @@ def _guarded_nx_answer(question: str, plan_library: Any | None, budget: float, m
             "plans_disabled_records": sweep.records if sweep else []}
     if before_call is not None:
         before_call()
+    # Truncated to the second: the engine stamps created_at in whole seconds.
+    started_at = datetime.now(timezone.utc).replace(microsecond=0)
     try:
         env = nx_answer_call(question, corpus_arg(PRODUCT), max_steps, timeout, budget_usd=budget)
     except NxError as e:
@@ -1047,7 +1070,7 @@ def _guarded_nx_answer(question: str, plan_library: Any | None, budget: float, m
                      "plan_grown_by_call": False, "error": notice, **repair_columns(env.get("repair"))}
     grown_by_call = False
     if sweep is not None:
-        valid, why, grown_by_call = plan_validity(plan_library, env.get("plan_id"), sweep.snapshot)
+        valid, why, grown_by_call = plan_validity(plan_library, env.get("plan_id"), sweep.snapshot, started_at)
     else:
         valid, why = False, "plan not checked: no plan library, grown plans were not disabled"
     return env, {**base, "plan_id": env.get("plan_id"), "valid": valid, "invalid_reason": why,
@@ -1401,8 +1424,13 @@ def precision_gate(rows: list[dict[str, Any]], threshold: float = PRECISION_GATE
         verdict = "invalid"
     else:
         verdict = "passed" if named and mean >= threshold - 1e-9 else "failed"
+    # Reported, never gated (RDR-147 R9): precision of the answers only option 1 admitted, beside the rest.
+    split: dict[str, dict[str, Any]] = {}
+    for key, pick in (("generated_on_join", True), ("rechecked", False)):
+        vals = [float(r["precision"]) for r in valid if r["n_pred"] and (r.get("generated_on_join") is True) is pick]
+        split[key] = {"n": len(vals), "mean": sum(vals) / len(vals) if vals else None}
     return {"mean": mean, "pooled": pooled, "per_question": per, "n_issue": len(issue), "n_valid": len(valid),
-            "n_named": len(named), "n_left_out": len(per) - len(named),
+            "n_named": len(named), "n_left_out": len(per) - len(named), "split": split,
             "threshold": threshold, "passed": verdict == "passed", "verdict": verdict}
 
 
@@ -1434,6 +1462,9 @@ def heldout_report(rows: list[dict[str, Any]], runs: Mapping[str, Any], n_asked:
             "n_skipped": sum(1 for r in rows if r.get("skipped")),
             "n_invalid": sum(1 for r in rows if not _usable(r) and not r.get("skipped")),
             "entered": sum(1 for r in valid if r.get("resolution_entered") is True),
+            # RDR-147 R9: an entered join now answers; count answered held-out outcomes, not firings only
+            "answered": sum(1 for r in valid if not str(r.get("final_text") or "").startswith("[non-answer:")),
+            "answered_on_join": sum(1 for r in valid if r.get("generated_on_join") is True),
             "not_entered_reasons": not_entered, "interpretable": not reasons, "reasons": reasons}
 
 

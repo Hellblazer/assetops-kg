@@ -764,7 +764,7 @@ def test_repair_columns_copy_the_report_fields():
         "joined_dropped": ["CUST-1@h9:no_text"], "tokens_dropped": ["CUST-9"],
         "anchors_scanned": 4, "anchors_without_pattern": 1,
         "anchor_key_ids_truncated": 6, "resolved_truncated": 1, "missing_truncated": 2, "ambiguous_truncated": 3,
-        "joined_dropped_truncated": 4, "tokens_dropped_truncated": 5}
+        "joined_dropped_truncated": 4, "tokens_dropped_truncated": 5, "generated_on_join": False}
 
 
 def test_repair_columns_carry_the_reason_a_considered_branch_did_not_enter():
@@ -987,6 +987,29 @@ def test_a_valid_run_whose_question_misses_a_company_is_failed():
     out = _jc([_qrow(1, named=("Acme",), anchors=("CUST-1", "CUST-2")), *_issue_rows()[1:]])
     assert out["verdict"] == "failed"
     assert _jc(_issue_rows())["verdict"] == "passed"
+
+
+def test_repair_columns_read_generated_on_join_only_as_a_boolean_true():
+    assert herb_ladder.repair_columns({"generated_on_join": True})["generated_on_join"] is True
+    for v in (None, "true", 1, False):
+        assert herb_ladder.repair_columns({"generated_on_join": v})["generated_on_join"] is False
+
+
+def test_precision_is_reported_split_by_generated_on_join_and_the_split_is_not_gated():
+    rows = [_qrow(1, named=("Acme", "Beta"), gold=("Acme",), generated_on_join=True), *_issue_rows()[1:]]
+    pg = herb_ladder.precision_gate(rows)
+    assert pg["split"]["generated_on_join"] == {"n": 1, "mean": pytest.approx(0.5)}
+    assert pg["split"]["rechecked"] == {"n": 4, "mean": pytest.approx(1.0)}
+    assert pg["mean"] == pytest.approx(0.9) and pg["verdict"] == "failed"    # the gate is still the plain mean
+
+
+def test_heldout_counts_answered_outcomes_and_answers_on_a_join():
+    rows = [{"valid": True, "final_text": "[non-answer: uncovered] x", "resolution_entered": False},
+            {"valid": True, "final_text": "Some answer", "resolution_entered": False},
+            {"valid": True, "final_text": "[exact-key join: 1 record(s) ...]\nAn answer", "resolution_entered": True,
+             "generated_on_join": True}]
+    rep = herb_ladder.heldout_report(rows, {"a": {"issue_entered": 1}, "b": {"issue_entered": 1}})
+    assert rep["answered"] == 2 and rep["answered_on_join"] == 1 and rep["entered"] == 1
 
 
 def test_one_in_domain_miss_per_run_passes_and_two_fail():
@@ -1276,6 +1299,25 @@ class FakeLibrary:
 
 
 BUILTIN = {"id": 1, "tags": "builtin-template,lookup"}
+
+
+def test_a_snapshot_id_re_grown_by_the_call_itself_is_valid_and_grown_by_call():
+    """2026-11-05 held-out rows on plans 13 and 14: the ids were in the pre-run snapshot, but nexus wrote the rows
+    again during the call (created_at after the call's start). Sam 2026-11-04: a run on its own grown plan is valid."""
+    from datetime import datetime, timezone
+    started = datetime(2026, 11, 5, 21, 54, 30, tzinfo=timezone.utc)
+    lib = FakeLibrary([BUILTIN, {"id": 14, "tags": "ad-hoc,grown", "created_at": "2026-11-05T21:55:49Z"}])
+    assert herb_ladder.plan_validity(lib, 14, frozenset({1, 14}), started) == (True, "", True)
+
+
+def test_a_grown_plan_created_before_the_call_is_still_invalid():
+    from datetime import datetime, timezone
+    started = datetime(2026, 11, 5, 21, 54, 30, tzinfo=timezone.utc)
+    lib = FakeLibrary([BUILTIN, {"id": 14, "tags": "ad-hoc,grown", "created_at": "2026-11-05T21:40:00Z"}])
+    valid, why, grown = herb_ladder.plan_validity(lib, 14, frozenset({1, 14}), started)
+    assert valid is False and grown is False and "existed before the run" in why
+    lib = FakeLibrary([BUILTIN, {"id": 15, "tags": "ad-hoc,grown", "created_at": "not a time"}])
+    assert herb_ladder.plan_validity(lib, 15, frozenset({1, 15}), started)[0] is False   # unreadable: no pass
 
 
 def test_sweep_disables_every_grown_plan_once_and_leaves_templates():
