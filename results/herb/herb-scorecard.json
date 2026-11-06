@@ -18,22 +18,22 @@
       "P2": {
         "metric": "resolution_accuracy_29_members",
         "by": "--p2-resolve",
-        "file": "p2-resolve-2026-11-05.json",
-        "timestamp_utc": "2026-11-05T15:39:04.773391+00:00",
-        "nexus_revision": "2d01960f4",
-        "nexus_dist_version": "7.95.1",
-        "nx_version": "nx, version 7.95.1",
-        "engine_release_version": "0.1.179"
+        "file": "p2-resolve-2026-11-06.json",
+        "timestamp_utc": "2026-11-06T15:12:55.907009+00:00",
+        "nexus_revision": "1ecf3ca6d",
+        "nexus_dist_version": "7.96.0",
+        "nx_version": "nx, version 7.96.0",
+        "engine_release_version": "0.1.180"
       },
       "MVV": {
         "by": "--mvv",
-        "file": "mvv-2026-11-05.json",
-        "timestamp_utc": "2026-11-05T16:05:30.816647+00:00",
-        "verdict": "failed",
-        "nexus_revision": "2d01960f4",
-        "nx_version": "nx, version 7.95.1",
-        "engine_release_version": "0.1.179",
-        "plan_service_url": "http://127.0.0.1:55851"
+        "file": "mvv-2026-11-06.json",
+        "timestamp_utc": "2026-11-06T15:13:42.834964+00:00",
+        "verdict": "passed",
+        "nexus_revision": "1ecf3ca6d",
+        "nx_version": "nx, version 7.96.0",
+        "engine_release_version": "0.1.180",
+        "plan_service_url": "http://127.0.0.1:52477"
       }
     }
   },
@@ -111,16 +111,16 @@
     {
       "phase": "MVV",
       "metric": "join_completeness_both_runs",
-      "value": 0.0,
-      "target": ">=4 of 5 issue questions in the domain and every one passes, both runs",
-      "status": "RED"
+      "value": 1.0,
+      "target": ">=4 of 5 issue questions in the domain, at most 1 failing, both runs",
+      "status": "GREEN"
     },
     {
       "phase": "MVV",
       "metric": "precision_mean_both_runs",
-      "value": 0.6,
+      "value": 1.0,
       "target": ">=0.95 in both runs",
-      "status": "RED"
+      "status": "GREEN"
     },
     {
       "phase": "MVV",
@@ -181,14 +181,14 @@
     {
       "phase": "MVV",
       "metric": "issue5_recall[b]",
-      "value": 0.36666666666666664,
+      "value": 0.4066666666666666,
       "target": "report",
       "status": "BASELINE"
     },
     {
       "phase": "MVV",
       "metric": "issue5_f1[b]",
-      "value": 0.4333333333333333,
+      "value": 0.5,
       "target": "report",
       "status": "BASELINE"
     },
@@ -225,19 +225,19 @@
     "wrong": [],
     "missing": [],
     "ambiguous": {},
-    "service_url": "http://127.0.0.1:55851",
-    "resolve_s": 0.031559458999254275,
-    "wall_s": 0.7970991250040242,
-    "nexus_revision": "2d01960f4",
-    "nexus_dist_version": "7.95.1",
-    "nx_version": "nx, version 7.95.1",
-    "engine_release_version": "0.1.179",
+    "service_url": "http://127.0.0.1:52477",
+    "resolve_s": 0.03980412500095554,
+    "wall_s": 0.9130900419986574,
+    "nexus_revision": "1ecf3ca6d",
+    "nexus_dist_version": "7.96.0",
+    "nx_version": "nx, version 7.96.0",
+    "engine_release_version": "0.1.180",
     "engine_app_version": "1.0-SNAPSHOT",
     "embedding_mode": "onnx-local",
     "embedding_model": "bge-base-en-v15-768",
-    "service_endpoint": "127.0.0.1:55851",
-    "timestamp_utc": "2026-11-05T15:39:04.773391+00:00",
-    "file": "p2-resolve-2026-11-05.json"
+    "service_endpoint": "127.0.0.1:52477",
+    "timestamp_utc": "2026-11-06T15:12:55.907009+00:00",
+    "file": "p2-resolve-2026-11-06.json"
   },
   "mvv": {
     "labels": [
@@ -253,6 +253,8 @@
           "floor": 4,
           "vacuous": false,
           "n_invalid": 0,
+          "n_missed": 0,
+          "max_misses": 1,
           "passed": true,
           "verdict": "passed",
           "reason": "",
@@ -313,11 +315,11 @@
               "missing_companies": [],
               "complete": false,
               "passed": false,
-              "reason": "outside the domain: no anchor ids, but the evidence holds 8 id(s) (boundary not reached or branch not considered; plan_id=9, resolution_reason='no_key_tokens', anchors_scanned=6, anchors_without_pattern=0)",
+              "reason": "outside the domain: no anchor ids, but the evidence holds 8 id(s) (boundary not reached or branch not considered; plan_id=10, resolution_reason='no_key_tokens', anchors_scanned=6, anchors_without_pattern=0)",
               "id_causes": {},
               "domain_exclusion": {
                 "evidence_holds_ids": true,
-                "plan_id": 9,
+                "plan_id": 10,
                 "resolution_reason": "no_key_tokens",
                 "anchors_scanned": 6,
                 "anchors_without_pattern": 0
@@ -586,22 +588,34 @@
           }
         },
         "precision": {
-          "mean": 0.8,
+          "mean": 1.0,
           "pooled": 1.0,
           "per_question": [
             1.0,
-            0.0,
+            null,
             1.0,
             1.0,
             1.0
           ],
           "n_issue": 5,
           "n_valid": 5,
+          "n_named": 4,
+          "n_left_out": 1,
+          "split": {
+            "generated_on_join": {
+              "n": 0,
+              "mean": null
+            },
+            "rechecked": {
+              "n": 4,
+              "mean": 1.0
+            }
+          },
           "threshold": 0.95,
-          "passed": false,
-          "verdict": "failed"
+          "passed": true,
+          "verdict": "passed"
         },
-        "verdict": "failed",
+        "verdict": "passed",
         "n_invalid": 0,
         "issue_entered": 4,
         "summary": {
@@ -633,7 +647,7 @@
           "precision": 0.0,
           "f1": 0.0
         },
-        "passed": false
+        "passed": true
       },
       "b": {
         "run_label": "b",
@@ -643,9 +657,11 @@
           "floor": 4,
           "vacuous": false,
           "n_invalid": 0,
-          "passed": false,
-          "verdict": "failed",
-          "reason": "an in-domain question failed",
+          "n_missed": 0,
+          "max_misses": 1,
+          "passed": true,
+          "verdict": "passed",
+          "reason": "",
           "questions": [
             {
               "question": "Find the names of companies were affected by issues in the AI Model & Search Algorithm in SearchFlow that caused decreased search accuracy and disrupted workflow?",
@@ -703,11 +719,11 @@
               "missing_companies": [],
               "complete": false,
               "passed": false,
-              "reason": "outside the domain: no anchor ids, but the evidence holds 8 id(s) (boundary not reached or branch not considered; plan_id=9, resolution_reason='no_key_tokens', anchors_scanned=6, anchors_without_pattern=0)",
+              "reason": "outside the domain: no anchor ids, but the evidence holds 8 id(s) (boundary not reached or branch not considered; plan_id=10, resolution_reason='no_key_tokens', anchors_scanned=6, anchors_without_pattern=0)",
               "id_causes": {},
               "domain_exclusion": {
                 "evidence_holds_ids": true,
-                "plan_id": 9,
+                "plan_id": 10,
                 "resolution_reason": "no_key_tokens",
                 "anchors_scanned": 6,
                 "anchors_without_pattern": 0
@@ -729,18 +745,18 @@
               "anchor_companies": [
                 "FusionTech"
               ],
-              "named": [],
-              "missing_companies": [
-                "FusionTech"
+              "named": [
+                "fusiontech"
               ],
-              "complete": false,
-              "passed": false,
-              "reason": "answer does not name ['FusionTech']",
+              "missing_companies": [],
+              "complete": true,
+              "passed": true,
+              "reason": "",
               "id_causes": {
                 "CUST-0018": {
                   "cause": "resolved",
                   "company": "FusionTech",
-                  "named": false,
+                  "named": true,
                   "dropped": []
                 }
               },
@@ -749,10 +765,8 @@
                 "companies": [
                   "FusionTech"
                 ],
-                "missing_companies": [
-                  "FusionTech"
-                ],
-                "complete": false
+                "missing_companies": [],
+                "complete": true
               }
             },
             {
@@ -866,7 +880,7 @@
           "excluded_with_evidence_ids": 1,
           "resolved_only_completeness": {
             "n_in_domain": 4,
-            "n_complete": 3,
+            "n_complete": 4,
             "gated": false
           },
           "evidence_completeness": {
@@ -935,7 +949,6 @@
                   "CloudSync",
                   "ComputeWorks",
                   "DataSolutions",
-                  "FusionTech",
                   "SmartData",
                   "TechCorp"
                 ],
@@ -979,36 +992,48 @@
           }
         },
         "precision": {
-          "mean": 0.6,
+          "mean": 1.0,
           "pooled": 1.0,
           "per_question": [
             1.0,
-            0.0,
-            0.0,
+            null,
+            1.0,
             1.0,
             1.0
           ],
           "n_issue": 5,
           "n_valid": 5,
+          "n_named": 4,
+          "n_left_out": 1,
+          "split": {
+            "generated_on_join": {
+              "n": 0,
+              "mean": null
+            },
+            "rechecked": {
+              "n": 4,
+              "mean": 1.0
+            }
+          },
           "threshold": 0.95,
-          "passed": false,
-          "verdict": "failed"
+          "passed": true,
+          "verdict": "passed"
         },
-        "verdict": "failed",
+        "verdict": "passed",
         "n_invalid": 0,
         "issue_entered": 4,
         "summary": {
           "all7": {
             "n": 7,
-            "recall": 0.2619047619047619,
-            "precision": 0.42857142857142855,
-            "f1": 0.3095238095238095
+            "recall": 0.29047619047619044,
+            "precision": 0.5714285714285714,
+            "f1": 0.35714285714285715
           },
           "issue5": {
             "n": 5,
-            "recall": 0.36666666666666664,
-            "precision": 0.6,
-            "f1": 0.4333333333333333
+            "recall": 0.4066666666666666,
+            "precision": 0.8,
+            "f1": 0.5
           },
           "agg2": {
             "n": 2,
@@ -1017,24 +1042,24 @@
             "f1": 0.0
           }
         },
-        "issue5_recall": 0.36666666666666664,
-        "issue5_precision": 0.6,
-        "issue5_f1": 0.4333333333333333,
+        "issue5_recall": 0.4066666666666666,
+        "issue5_precision": 0.8,
+        "issue5_f1": 0.5,
         "agg2": {
           "n": 2,
           "recall": 0.0,
           "precision": 0.0,
           "f1": 0.0
         },
-        "passed": false
+        "passed": true
       }
     },
-    "verdict": "failed",
-    "passed": false,
-    "join_completeness_verdict": "failed",
-    "precision_verdict": "failed",
-    "join_completeness_passed": false,
-    "precision_passed": false,
+    "verdict": "passed",
+    "passed": true,
+    "join_completeness_verdict": "passed",
+    "precision_verdict": "passed",
+    "join_completeness_passed": true,
+    "precision_passed": true,
     "script_issue5_f1": 0.7642857142857142,
     "heldout": {
       "asked": 20,
@@ -1043,63 +1068,65 @@
       "n_skipped": 0,
       "n_invalid": 0,
       "entered": 0,
+      "answered": 8,
+      "answered_on_join": 0,
       "not_entered_reasons": {
-        "not_attempted": 9,
-        "no_key_tokens": 11
+        "no_key_tokens": 12,
+        "not_attempted": 8
       },
       "interpretable": true,
       "reasons": []
     },
     "run": {
-      "cap_usd": 8.0,
-      "total_cost_usd": 1.010959,
-      "cumulative_cost_usd": 5.010959,
+      "cap_usd": 4.0,
+      "total_cost_usd": 1.19888,
+      "cumulative_cost_usd": 2.214374,
       "nx_answer": {
-        "total_cost_usd": 0.317806,
-        "cumulative_cost_usd": 4.317806,
-        "cap_usd": 8.0,
+        "total_cost_usd": 0.362803,
+        "cumulative_cost_usd": 1.378298,
+        "cap_usd": 4.0,
         "runs_with_unknown_cost": 0,
         "complete": true,
         "by_run": {
           "a": {
-            "total_cost_usd": 0.247671,
-            "cumulative_cost_usd": 4.247671,
-            "cap_usd": 8.0,
+            "total_cost_usd": 0.243429,
+            "cumulative_cost_usd": 1.258924,
+            "cap_usd": 4.0,
             "runs_with_unknown_cost": 0,
             "complete": true
           },
           "b": {
-            "total_cost_usd": 0.070136,
-            "cumulative_cost_usd": 4.317806,
-            "cap_usd": 8.0,
+            "total_cost_usd": 0.119375,
+            "cumulative_cost_usd": 1.378298,
+            "cap_usd": 4.0,
             "runs_with_unknown_cost": 0,
             "complete": true
           }
         }
       },
       "heldout": {
-        "total_cost_usd": 0.693152,
-        "cumulative_cost_usd": 5.010959,
-        "cap_usd": 8.0,
+        "total_cost_usd": 0.836076,
+        "cumulative_cost_usd": 2.214374,
+        "cap_usd": 4.0,
         "runs_with_unknown_cost": 0,
         "complete": true
       },
       "complete": true,
-      "run_id": "2026-11-05",
-      "timestamp_utc": "2026-11-05T16:05:30.816647+00:00",
-      "resumed": true,
-      "nexus_revision": "2d01960f4",
-      "nx_version": "nx, version 7.95.1",
-      "engine_release_version": "0.1.179",
+      "run_id": "2026-11-06",
+      "timestamp_utc": "2026-11-06T15:13:42.834964+00:00",
+      "resumed": false,
+      "nexus_revision": "1ecf3ca6d",
+      "nx_version": "nx, version 7.96.0",
+      "engine_release_version": "0.1.180",
       "engine_app_version": "1.0-SNAPSHOT",
       "embedding_mode": "onnx-local",
       "embedding_model": "bge-base-en-v15-768",
-      "service_endpoint": "127.0.0.1:55851",
-      "plan_service_url": "http://127.0.0.1:55851",
+      "service_endpoint": "127.0.0.1:52477",
+      "plan_service_url": "http://127.0.0.1:52477",
       "product": "SearchFlow",
       "collection": "knowledge__herb-searchflow",
       "sandbox": true
     },
-    "file": "mvv-2026-11-05.json"
+    "file": "mvv-2026-11-06.json"
   }
 }
