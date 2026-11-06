@@ -764,7 +764,7 @@ def test_repair_columns_copy_the_report_fields():
         "joined_dropped": ["CUST-1@h9:no_text"], "tokens_dropped": ["CUST-9"],
         "anchors_scanned": 4, "anchors_without_pattern": 1,
         "anchor_key_ids_truncated": 6, "resolved_truncated": 1, "missing_truncated": 2, "ambiguous_truncated": 3,
-        "joined_dropped_truncated": 4, "tokens_dropped_truncated": 5}
+        "joined_dropped_truncated": 4, "tokens_dropped_truncated": 5, "generated_on_join": False}
 
 
 def test_repair_columns_carry_the_reason_a_considered_branch_did_not_enter():
@@ -807,8 +807,10 @@ def test_repair_columns_turn_null_lists_into_empty_ones():
 # --- join completeness: gated, over anchor_key_ids ---
 
 
-def _jc(rows):
-    return herb_ladder.join_completeness(rows, REGISTRY)
+def _jc(rows, max_misses=0):
+    """Strict by default (no in-domain miss allowed), so one failing question shows as a failed run and the
+    question-level rules are pinned on their own; the one-miss tolerance is tested with max_misses=1 below."""
+    return herb_ladder.join_completeness(rows, REGISTRY, max_misses=max_misses)
 
 
 def test_completeness_passes_when_named_companies_are_a_superset():
@@ -985,6 +987,62 @@ def test_a_valid_run_whose_question_misses_a_company_is_failed():
     out = _jc([_qrow(1, named=("Acme",), anchors=("CUST-1", "CUST-2")), *_issue_rows()[1:]])
     assert out["verdict"] == "failed"
     assert _jc(_issue_rows())["verdict"] == "passed"
+
+
+def test_repair_columns_read_generated_on_join_only_as_a_boolean_true():
+    assert herb_ladder.repair_columns({"generated_on_join": True})["generated_on_join"] is True
+    for v in (None, "true", 1, False):
+        assert herb_ladder.repair_columns({"generated_on_join": v})["generated_on_join"] is False
+
+
+def test_precision_is_reported_split_by_generated_on_join_and_the_split_is_not_gated():
+    rows = [_qrow(1, named=("Acme", "Beta"), gold=("Acme",), generated_on_join=True), *_issue_rows()[1:]]
+    pg = herb_ladder.precision_gate(rows)
+    assert pg["split"]["generated_on_join"] == {"n": 1, "mean": pytest.approx(0.5)}
+    assert pg["split"]["rechecked"] == {"n": 4, "mean": pytest.approx(1.0)}
+    assert pg["mean"] == pytest.approx(0.9) and pg["verdict"] == "failed"    # the gate is still the plain mean
+
+
+def test_heldout_counts_answered_outcomes_and_answers_on_a_join():
+    rows = [{"valid": True, "final_text": "[non-answer: uncovered] x", "resolution_entered": False},
+            {"valid": True, "final_text": "Some answer", "resolution_entered": False},
+            {"valid": True, "final_text": "[exact-key join: 1 record(s) ...]\nAn answer", "resolution_entered": True,
+             "generated_on_join": True}]
+    rep = herb_ladder.heldout_report(rows, {"a": {"issue_entered": 1}, "b": {"issue_entered": 1}})
+    assert rep["answered"] == 2 and rep["answered_on_join"] == 1 and rep["entered"] == 1
+
+
+def test_one_in_domain_miss_per_run_passes_and_two_fail():
+    """Sam 2026-11-05 (T2 nexus/rdr147-mvv-bar-revision-2026-11-05): at most one in-domain question may fail."""
+    one = [_qrow(1, named=(), anchors=("CUST-1",)), *_issue_rows()[1:]]
+    out = herb_ladder.join_completeness(one, REGISTRY)
+    assert out["verdict"] == "passed" and out["n_missed"] == 1 and out["max_misses"] == 1
+    assert "1 in-domain miss" in out["reason"]
+    two = [_qrow(1, named=(), anchors=("CUST-1",)), _qrow(2, entered=False), *_issue_rows()[2:]]
+    out = herb_ladder.join_completeness(two, REGISTRY)
+    assert out["verdict"] == "failed" and out["n_missed"] == 2 and "at most 1 allowed" in out["reason"]
+
+
+def test_the_miss_tolerance_does_not_lower_the_domain_floor():
+    rows = [_qrow(1, anchors=()), _qrow(2, anchors=()), *_issue_rows()[2:]]       # 3 in the domain, none failing
+    out = herb_ladder.join_completeness(rows, REGISTRY)
+    assert out["vacuous"] is True and out["verdict"] == "failed"
+
+
+def test_precision_leaves_out_a_question_that_named_no_company():
+    """Sam 2026-11-05: precision of the named companies is undefined for a non-answer, so it is left out."""
+    rows = [_qrow(1, named=()), *_issue_rows()[1:]]
+    pg = herb_ladder.precision_gate(rows)
+    assert pg["per_question"][0] is None and pg["n_named"] == 4 and pg["n_left_out"] == 1
+    assert pg["mean"] == pytest.approx(1.0) and pg["verdict"] == "passed"
+
+
+def test_precision_still_counts_a_wrong_company_and_fails_a_run_that_named_none():
+    wrong = [_qrow(1, named=("Acme", "Beta"), gold=("Acme",)), *_issue_rows()[1:]]   # 0.5 on one question
+    assert herb_ladder.precision_gate(wrong)["mean"] == pytest.approx((0.5 + 4) / 5)
+    none = [_qrow(i, named=()) for i in range(1, 6)]
+    pg = herb_ladder.precision_gate(none)
+    assert pg["n_named"] == 0 and pg["verdict"] == "failed"
 
 
 def test_a_vacuous_run_is_failed_not_invalid():
@@ -1241,6 +1299,25 @@ class FakeLibrary:
 
 
 BUILTIN = {"id": 1, "tags": "builtin-template,lookup"}
+
+
+def test_a_snapshot_id_re_grown_by_the_call_itself_is_valid_and_grown_by_call():
+    """2026-11-05 held-out rows on plans 13 and 14: the ids were in the pre-run snapshot, but nexus wrote the rows
+    again during the call (created_at after the call's start). Sam 2026-11-04: a run on its own grown plan is valid."""
+    from datetime import datetime, timezone
+    started = datetime(2026, 11, 5, 21, 54, 30, tzinfo=timezone.utc)
+    lib = FakeLibrary([BUILTIN, {"id": 14, "tags": "ad-hoc,grown", "created_at": "2026-11-05T21:55:49Z"}])
+    assert herb_ladder.plan_validity(lib, 14, frozenset({1, 14}), started) == (True, "", True)
+
+
+def test_a_grown_plan_created_before_the_call_is_still_invalid():
+    from datetime import datetime, timezone
+    started = datetime(2026, 11, 5, 21, 54, 30, tzinfo=timezone.utc)
+    lib = FakeLibrary([BUILTIN, {"id": 14, "tags": "ad-hoc,grown", "created_at": "2026-11-05T21:40:00Z"}])
+    valid, why, grown = herb_ladder.plan_validity(lib, 14, frozenset({1, 14}), started)
+    assert valid is False and grown is False and "existed before the run" in why
+    lib = FakeLibrary([BUILTIN, {"id": 15, "tags": "ad-hoc,grown", "created_at": "not a time"}])
+    assert herb_ladder.plan_validity(lib, 15, frozenset({1, 15}), started)[0] is False   # unreadable: no pass
 
 
 def test_sweep_disables_every_grown_plan_once_and_leaves_templates():
@@ -1844,11 +1921,12 @@ def test_invalid_rows_are_left_out_of_the_reported_figures():
 def test_the_scorecard_rungs_go_red_when_a_gate_fails():
     bad = _issue_rows(label="b")
     bad[0] = _qrow(1, named=("Acme", "Beta", "Gamma", "Delta"), label="b")        # precision 0.25 on one question
-    bad[1] = _qrow(2, entered=False, label="b")                                    # and a question that did not enter
+    bad[1] = _qrow(2, entered=False, label="b")                                    # a question that did not enter
+    bad[2] = _qrow(3, named=(), label="b")                                         # and a non-answer: two misses
     rungs = {r["metric"]: r for r in herb_ladder.mvv_rungs(_mvv(_issue_rows(label="a"), bad))}
     assert rungs["join_completeness_both_runs"]["status"] == "RED" and rungs["join_completeness_both_runs"]["value"] == 0.0
     assert rungs["precision_mean_both_runs"]["status"] == "RED"
-    assert rungs["precision_mean_both_runs"]["value"] == pytest.approx(0.85)
+    assert rungs["precision_mean_both_runs"]["value"] == pytest.approx((0.25 + 1 + 1 + 1) / 4)   # the non-answer left out
     good = {r["metric"]: r for r in herb_ladder.mvv_rungs(_mvv(_issue_rows(label="a"), _issue_rows(label="b")))}
     assert good["join_completeness_both_runs"]["status"] == good["precision_mean_both_runs"]["status"] == "GREEN"
 
