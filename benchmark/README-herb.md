@@ -86,8 +86,14 @@ NX_ANSWER_RESOLUTION_REPAIR=1 HERB_NEXUS_REV=<sha> HERB_SANDBOX_LLM=1 \
 python3 -m benchmark.herb_ladder --copy-scorecard-to <nexus>/docs/rdr/evidence/rdr-147   # then commit it in nexus
 ```
 
-The 4 USD cap is per run date: a `--resume` with another DATE, or a row file moved aside, starts a fresh cap, and
-`--cap-usd` overrides the cap itself. Within one date it is cumulative over every invocation.
+The 4 USD cap is per run date and is read back from the cost ledger (label `mvv`, `mvv_run` the date), so within one
+date it is cumulative over every invocation. A `--resume` with another DATE starts a fresh cap; a row file moved aside
+does not (the ledger still holds the date's charges). `--cap-usd` overrides the cap itself.
+
+`--mvv` also refuses unless `claude` is on the PATH it runs with and `CLAUDE_CODE_OAUTH_TOKEN` is set
+(`mvv_llm_violations`): without them nx_answer does not fail but falls back to a single-step template, and every row
+reads as a valid zero. `herb_sandbox.sh` adds the directory of the caller's `claude` (or `CLAUDE_BIN`) to the sandbox
+PATH when `HERB_SANDBOX_LLM=1`.
 
 **The switch is environment-only.** nexus reads `NX_ANSWER_RESOLUTION_REPAIR` from the process environment and
 never from config, and it is off unless set to an on value (`1`, `true`, `yes`, `on`). The sandbox's `env -i`

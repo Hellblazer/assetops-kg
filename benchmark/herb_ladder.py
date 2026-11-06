@@ -52,6 +52,7 @@ import json
 import os
 import pwd
 import re
+import shutil
 import subprocess
 import textwrap
 import time
@@ -829,6 +830,21 @@ def mvv_switch_violations(env: Mapping[str, str]) -> list[str]:
     return bad
 
 
+def mvv_llm_violations(env: Mapping[str, str]) -> list[str]:
+    """Reasons nx_answer could not reach its LLM from *env*; empty means it can. Without ``claude`` on the PATH
+    nexus does not fail: the inline planner and the coverage assessment fall away, a single-step template
+    answers with a raw listing at exit 0, and every row reads as a valid zero (the 2026-11-05 first MVV run,
+    ``results/herb/mvv-2026-11-05.no-claude-on-path.jsonl``). The token's value never enters a message."""
+    bad: list[str] = []
+    if shutil.which("claude", path=env.get("PATH", "")) is None:
+        bad.append("claude is not on the PATH nx_answer will see: herb_sandbox.sh adds its directory when "
+                   "HERB_SANDBOX_LLM=1 and claude is on the caller's PATH (or CLAUDE_BIN names it)")
+    if not str(env.get("CLAUDE_CODE_OAUTH_TOKEN", "")).strip():
+        bad.append("CLAUDE_CODE_OAUTH_TOKEN is not set: run under the nexus credential helper with "
+                   "HERB_SANDBOX_LLM=1 (README-herb.md)")
+    return bad
+
+
 # --------------------------------------------------------------------------- #
 # The RDR-147 MVV: grown plans, the RepairReport columns, two runs per question
 # --------------------------------------------------------------------------- #
@@ -1454,7 +1470,7 @@ def run_mvv(questions: list[dict[str, Any]], universe: list[str], cust_to_compan
     process's environment (``mvv_switch_violations``). With *run_id* the cap is cumulative over every
     invocation of that run (the cost ledger is read back); with *sink* every row is appended as it lands; with
     *prior* (``sink.load()``) valid rows are kept and not re-run."""
-    bad = mvv_switch_violations(os.environ)
+    bad = mvv_switch_violations(os.environ) + mvv_llm_violations(os.environ)
     if bad:
         raise NxError("the MVV refuses to spend: " + "; ".join(bad))
     budget = Budget(cap_usd, spent=ledger_spent(run_id))
@@ -1784,7 +1800,7 @@ def emit_mvv(cap_usd: float = MVV_CAP_USD, date: str | None = None, resume: bool
     the spend is the MVV's nx_answer calls only."""
     if date:
         valid_run_date(date)
-    bad = mvv_switch_violations(os.environ)
+    bad = mvv_switch_violations(os.environ) + mvv_llm_violations(os.environ)
     if bad:
         raise NxError("the MVV refuses to spend: " + "; ".join(bad))
     stamp = datetime.now(timezone.utc)
