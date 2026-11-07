@@ -1250,6 +1250,25 @@ def test_each_conjunct_is_needed_and_a_not_attempted_repair_is_not_an_unsupporte
     assert (h["unsupported_facet"], h["evidence_keys"]) == ((0, 4) if drop == "reason" else (4, 0))
 
 
+@pytest.mark.parametrize(("reason", "outcome", "counts"), [
+    ("unsupported", "no_new_evidence", True),
+    ("unsupported_and_unread_tail", "completed", True),
+    ("unread_tail", "no_new_evidence", False),
+    ("", "no_new_evidence", False),
+    ("unsupported", "unavailable", False),
+    ("unsupported", "skipped_deadline", False),
+    ("unsupported", "skipped_budget", False),
+    ("unsupported", "not_attempted", False),
+])
+def test_the_unsupported_facet_conjunct_reads_the_reason_and_needs_a_repair_that_ran(reason, outcome, counts):
+    """Review r2: only reasons naming unsupported facets count, and only when the repair reached the branch."""
+    rows = _held(3, entered=(), invalid=(), both=(0, 1, 2))
+    for r in rows:
+        r.update(repair_reason=reason, repair_outcome=outcome)
+    h = _mvv(_issue_rows(label="a"), _issue_rows(label="b"), rows)["heldout"]
+    assert h["unsupported_facet"] == (3 if counts else 0) and h["interpretable"] is counts
+
+
 def test_an_entered_heldout_count_needs_no_both_conjuncts_floor():
     h = _mvv(_issue_rows(label="a"), _issue_rows(label="b"), _held(6, entered=(0,), invalid=()))["heldout"]
     assert h["entered"] == 1 and h["interpretable"] is True
@@ -1297,6 +1316,25 @@ def test_the_key_arm_runs_in_run_mvv_records_its_conjuncts_and_resumes_without_r
     again = herb_ladder.run_mvv(_issue_qs(), ["Acme"], {"CUST-1": "Acme"}, held, 4.0, lib, key_heldout=key, prior=prior)
     assert ans.n == n, "a resume keeps valid key-arm rows and runs nothing"
     assert again["score"]["key_heldout"]["both_conjuncts"] == 3
+
+
+def test_the_key_arm_shares_the_cap_and_is_charged_to_the_runs_ledger(monkeypatch):
+    """Review r2: the arm spends from the same budget (a small cap skips it) and its ledger rows count toward a
+    resume's cumulative cap (run mvv, the run id, stage key_heldout)."""
+    log: list = []
+    lib = FakeLibrary([BUILTIN], log)
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", FakeAnswer(lib, log, cost=0.05))
+    held = [{"herb_index": 0, "question": "h0", "type": "content", "ground_truth": "g", "citations": ["c"]}]
+    key = [{"herb_index": 30, "question": "k0", "type": "person", "ground_truth": ["eid_0000000a"],
+            "citations": ["c"], "cited_keys": 1}]
+    mvv = herb_ladder.run_mvv(_issue_qs(), ["Acme"], {"CUST-1": "Acme"}, held, 4.0, lib, run_id=RUN_ID, key_heldout=key)
+    rows = [r for r in _settled(_ledger_rows()) if r.get("stage") == "key_heldout"]
+    assert len(rows) == 1 and rows[0]["run"] == "mvv" and rows[0]["mvv_run"] == RUN_ID
+    assert herb_ladder.ledger_spent(RUN_ID) == pytest.approx(mvv["meta"]["cumulative_cost_usd"])
+    spent = herb_ladder.ledger_spent(RUN_ID)
+    tight = herb_ladder.run_mvv(_issue_qs(), ["Acme"], {"CUST-1": "Acme"}, held, spent, lib, run_id=RUN_ID,
+                                key_heldout=key)
+    assert [r.get("skipped") for r in tight["heldout_rows"] if r["run_label"] == "key_heldout"] == ["cost cap reached"]
 
 
 def test_the_key_heldout_arm_selects_non_company_questions_whose_citations_name_a_key():
@@ -2590,7 +2628,8 @@ def test_the_plan_library_adapter_keeps_the_url_the_driver_reported(world, monke
 # --- --mvv: its own record, the scorecard patched in place, the Step 0 baselines left alone ---
 
 
-def _emit_world(monkeypatch, tmp_path, *, cost=0.05, fail_on=(), report=ANCHOR_REPORT, phases=("P1", "P2", "E2E-nx_answer")):
+def _emit_world(monkeypatch, tmp_path, *, cost=0.05, fail_on=(), report=ANCHOR_REPORT, phases=("P1", "P2", "E2E-nx_answer"),
+                key=()):
     results = tmp_path / "herb"
     results.mkdir()
     card = _card(*phases)
@@ -2612,7 +2651,7 @@ def _emit_world(monkeypatch, tmp_path, *, cost=0.05, fail_on=(), report=ANCHOR_R
     monkeypatch.setattr(herb_ladder, "_load_gold", lambda: {
         "members": {}, "cust_to_company": REGISTRY, "mentions": {}, "q_to_custs": {}})
     monkeypatch.setattr(herb_ladder, "_load_product", lambda: {"answerable_questions": questions})
-    monkeypatch.setattr(herb_ladder, "load_heldout", lambda path=None: held if path is None else [])
+    monkeypatch.setattr(herb_ladder, "load_heldout", lambda path=None: held if path is None else list(key))
     monkeypatch.setattr(herb_ladder, "service_versions", lambda: dict(_VERSIONS))
     monkeypatch.setenv("HERB_NEXUS_REV", REV)
     monkeypatch.setattr(herb_ladder, "nx_answer_call", ans)
@@ -2632,6 +2671,17 @@ def test_emit_mvv_writes_its_own_record_and_leaves_the_step0_baselines_alone(mon
     assert rec["meta"]["nx_version"] == _VERSIONS["nx_version"] and rec["meta"]["run_id"] == RUN_ID
     assert len((w.results / f"mvv-{RUN_ID}.jsonl").read_text().splitlines()) == 15
     assert out["verdict"] == "passed"
+
+
+def test_emit_mvv_runs_the_frozen_key_arm_and_records_its_rows(monkeypatch, tmp_path):
+    """Review r2: emit_mvv loads the key-bearing fixture and hands it to run_mvv."""
+    key = [{"herb_index": 30, "question": "k0", "type": "person", "ground_truth": ["eid_0000000a"],
+            "citations": ["c"], "cited_keys": 1}]
+    w = _emit_world(monkeypatch, tmp_path, key=key)
+    herb_ladder.emit_mvv(cap_usd=4.0, date=RUN_ID, plan_library=w.lib)
+    rec = json.loads((w.results / f"mvv-{RUN_ID}.json").read_text())
+    assert [r["question"] for r in rec["heldout_rows"] if r["run_label"] == "key_heldout"] == ["k0"]
+    assert rec["score"]["key_heldout"]["asked"] == 1 and w.ans.n == 2 * 7 + 1 + 1
 
 
 def test_emit_mvv_patches_only_the_mvv_rungs_and_section_into_the_scorecard(monkeypatch, tmp_path):

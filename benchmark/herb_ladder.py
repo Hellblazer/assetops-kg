@@ -25,8 +25,8 @@ metric computes to its RED baseline; the harness is the oracle, not the implemen
 
 The RDR-147 MVV (``--mvv``, nexus-bwct4.1) runs every issue question twice (labels a and b) with
 every grown plan soft-disabled before each run, then scores join completeness and precision (verdict
-passed, failed or invalid), and counts how often the resolution branch fires on a frozen single-hop
-held-out set. It writes ``results/herb/mvv-<date>.json`` and patches only the MVV rungs into the scorecard
+passed, failed or invalid), and counts how often the resolution branch fires on a frozen non-company
+held-out set and on a key-bearing arm (nexus-bwct4.4). It writes ``results/herb/mvv-<date>.json`` and patches only the MVV rungs into the scorecard
 (``emit_mvv``); the Step 0 baselines are never rewritten by it. The rules are in
 ``benchmark/README-herb.md`` (section "The RDR-147 MVV").
 
@@ -141,6 +141,9 @@ HELDOUT_LIMIT = 20               # the single-hop held-out set: the first 20 non
 # entered (coverage_ledger.py, the entered path), so it would make every zero read uninterpretable.
 HELDOUT_MIN_BOTH_CONJUNCTS = 3
 _UNSUPPORTED_REASONS = frozenset({"unsupported", "unsupported_and_unread_tail"})
+#: Repair outcomes that never reached the branch (no repair, or one skipped or refused before it ran); a row with
+#: one of these is not counted as holding the unsupported-facet conjunct even when its reason names unsupported facets.
+_REPAIR_NOT_RUN = frozenset({"", "not_attempted", "unavailable", "skipped_deadline", "skipped_budget"})
 #: The items a HERB single-hop ground truth lists: employee ids and PR links, matched whole.
 _GT_ITEM_RE = re.compile(r"eid_[0-9a-f]{8}\b|https://github\.com/[\w.-]+/[\w.-]+/pull/\d+\b")
 MVV_CAP_USD = 4.0                # spend cap of the MVV run
@@ -1300,7 +1303,7 @@ def run_heldout_rows(
     sink: MvvRows | None = None,
     prior: Mapping[tuple[str, str], Mapping[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """The single-hop held-out questions, each run ONCE with the resolution switch on (the environment's),
+    """The held-out questions (either arm), each run ONCE with the resolution switch on (the environment's),
     behind the same grown-plan sweep. Rows record the plan, validity and RepairReport columns; they are not
     scored against a gold (the count is of runs where the branch entered)."""
     budget = budget if budget is not None else Budget(cap_usd)
@@ -1528,16 +1531,18 @@ def heldout_report(rows: list[dict[str, Any]], runs: Mapping[str, Any], n_asked:
     when fewer than :data:`HELDOUT_MIN_BOTH_CONJUNCTS` valid rows had both conjuncts of the gate (nexus-bwct4.4):
     ``unsupported_facet`` (the repair report's ``repair_reason`` names unsupported facets) and ``evidence_keys`` (the
     row's evidence texts name a customer key), each counted apart from whether the branch entered, and
-    ``both_conjuncts`` where both held. Evidence keys over-approximate the anchors the gate scans, so a row with both
-    that did not enter may be the anchor-only scan Sam kept (nexus-z938f): its ``not_entered_reasons`` entry
-    (``no_key_tokens``) says so. For rows whose ground truth is a list of items (employee ids, PR links, matched
+    ``both_conjuncts`` where both held. A repair that never reached the branch (``_REPAIR_NOT_RUN``) does not count.
+    Evidence keys differ from the keys in the anchors the gate scans (other chunks, a fixed ``CUST-\\d{4}`` pattern),
+    so a row with both that did not enter may be the anchor-only scan Sam kept (nexus-z938f) or a pattern mismatch;
+    ``not_entered_reasons`` (``no_key_tokens``) is where to look. For rows whose ground truth is a list of items (employee ids, PR links, matched
     whole), ``ground_truth`` gives answered rows' mean recall and precision, overall and split by
     ``generated_on_join``; ``None`` when no row has such a ground truth."""
     valid = [r for r in rows if _usable(r)]
     reasons: list[str] = []
     if not valid:
         reasons.append("no valid held-out run")
-    unsupported = [r for r in valid if r.get("repair_reason") in _UNSUPPORTED_REASONS]
+    unsupported = [r for r in valid if r.get("repair_reason") in _UNSUPPORTED_REASONS
+                   and r.get("repair_outcome") not in _REPAIR_NOT_RUN]
     keyed = [r for r in valid if r.get("evidence_key_ids")]
     both = sum(1 for r in unsupported if r.get("evidence_key_ids"))
     entered = sum(1 for r in valid if r.get("resolution_entered") is True)
@@ -1808,7 +1813,8 @@ def mvv_rungs(score: dict[str, Any]) -> list[dict[str, Any]]:
             "MVV", "key_heldout_branch_entered", key["entered"] / key["n_valid"] if key["n_valid"] else None,
             f"report ({key['entered']} entered, {key['both_conjuncts']} with both conjuncts "
             f"({key['unsupported_facet']} unsupported, {key['evidence_keys']} keyed), of {key['n_valid']} valid of "
-            f"{key['asked']} asked; ground truth {key['ground_truth']}; {kread})",
+            f"{key['asked']} asked; not entered {key['not_entered_reasons']}; ground truth {key['ground_truth']}; "
+            f"{kread})",
             "BASELINE"))
     for lb in RUN_LABELS:
         if lb not in runs:
@@ -2083,7 +2089,7 @@ def main() -> None:
                     help="write benchmark/fixtures/herb/single_hop_heldout.json from ~/git/HERB and exit "
                          "(refuses when it exists: the set is frozen)")
     ap.add_argument("--freeze-key-heldout", action="store_true",
-                    help="write benchmark/fixtures/herb/single_hop_key_heldout.json (the key-bearing single-hop "
+                    help="write benchmark/fixtures/herb/single_hop_key_heldout.json (the key-bearing held-out "
                          "arm, nexus-bwct4.4) from ~/git/HERB and exit (refuses when it exists)")
     ap.add_argument("--copy-scorecard-to", metavar="DIR",
                     help="copy results/herb/herb-scorecard.json into DIR (nexus docs/rdr/evidence/rdr-147) and exit")
