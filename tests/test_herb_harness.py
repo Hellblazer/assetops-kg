@@ -764,7 +764,8 @@ def test_repair_columns_copy_the_report_fields():
         "joined_dropped": ["CUST-1@h9:no_text"], "tokens_dropped": ["CUST-9"],
         "anchors_scanned": 4, "anchors_without_pattern": 1,
         "anchor_key_ids_truncated": 6, "resolved_truncated": 1, "missing_truncated": 2, "ambiguous_truncated": 3,
-        "joined_dropped_truncated": 4, "tokens_dropped_truncated": 5, "generated_on_join": False}
+        "joined_dropped_truncated": 4, "tokens_dropped_truncated": 5, "generated_on_join": False,
+        "repair_reason": ""}
 
 
 def test_repair_columns_carry_the_reason_a_considered_branch_did_not_enter():
@@ -1187,11 +1188,14 @@ def test_mvv_reports_issue5_f1_beside_the_script_value_and_agg2_unasserted():
     assert out["runs"]["a"]["run_label"] == "a"
 
 
-def _held(n=6, *, entered=(0, 1, 4), invalid=(4,), skipped=()):
+def _held(n=6, *, entered=(0, 1, 4), invalid=(4,), skipped=(), both=()):
     rows = []
     for i in range(n):
         row = {"question": f"h{i}", "run_label": "heldout", "valid": i not in invalid and i not in skipped,
                "resolution_entered": i in entered, "resolution_reason": ""}
+        if i in both:  # both conjuncts held, as nexus reports them whether or not the branch entered
+            row.update(repair_outcome="no_new_evidence", repair_reason="unsupported", evidence_key_ids=["CUST-0001"],
+                       resolution_reason="no_key_tokens")
         if i in skipped:
             row["skipped"] = "cost cap reached"
         rows.append(row)
@@ -1221,8 +1225,137 @@ def test_a_heldout_zero_is_not_interpretable_when_the_branch_entered_no_issue_qu
 
 def test_a_heldout_zero_stays_interpretable_when_one_run_entered_the_branch():
     a = _issue_rows(label="a", entered=False)
-    h = _mvv(a, _issue_rows(label="b"), _held(6, entered=()))["heldout"]
-    assert h["interpretable"] is True
+    h = _mvv(a, _issue_rows(label="b"), _held(6, entered=(), invalid=(), both=(0, 2, 3)))["heldout"]
+    assert h["interpretable"] is True and h["both_conjuncts"] == 3
+
+
+def test_a_heldout_zero_with_too_few_rows_holding_both_conjuncts_is_not_interpretable():
+    """nexus-bwct4.4: the final MVV's 0 of 20 had no row with an unsupported facet AND evidence keys."""
+    h = _mvv(_issue_rows(label="a"), _issue_rows(label="b"), _held(6, entered=(), invalid=(), both=(0, 1)))["heldout"]
+    assert (h["entered"], h["both_conjuncts"], h["interpretable"]) == (0, 2, False)
+    assert any("both conjuncts" in r for r in h["reasons"])
+
+
+@pytest.mark.parametrize("drop", ["reason", "keys"])
+def test_each_conjunct_is_needed_and_a_not_attempted_repair_is_not_an_unsupported_facet(drop):
+    """Review r1: each conjunct is read on its own, and nexus's default outcome 'not_attempted' is not a repair."""
+    rows = _held(4, entered=(), invalid=(), both=(0, 1, 2, 3))
+    for r in rows:
+        if drop == "reason":
+            r.update(repair_outcome="not_attempted", repair_reason="")
+        else:
+            r["evidence_key_ids"] = []
+    h = _mvv(_issue_rows(label="a"), _issue_rows(label="b"), rows)["heldout"]
+    assert h["both_conjuncts"] == 0 and h["interpretable"] is False
+    assert (h["unsupported_facet"], h["evidence_keys"]) == ((0, 4) if drop == "reason" else (4, 0))
+
+
+@pytest.mark.parametrize(("reason", "outcome", "counts"), [
+    ("unsupported", "no_new_evidence", True),
+    ("unsupported_and_unread_tail", "completed", True),
+    ("unread_tail", "no_new_evidence", False),
+    ("", "no_new_evidence", False),
+    ("unsupported", "unavailable", False),
+    ("unsupported", "skipped_deadline", False),
+    ("unsupported", "skipped_budget", False),
+    ("unsupported", "not_attempted", False),
+])
+def test_the_unsupported_facet_conjunct_reads_the_reason_and_needs_a_repair_that_ran(reason, outcome, counts):
+    """Review r2: only reasons naming unsupported facets count, and only when the repair reached the branch."""
+    rows = _held(3, entered=(), invalid=(), both=(0, 1, 2))
+    for r in rows:
+        r.update(repair_reason=reason, repair_outcome=outcome)
+    h = _mvv(_issue_rows(label="a"), _issue_rows(label="b"), rows)["heldout"]
+    assert h["unsupported_facet"] == (3 if counts else 0) and h["interpretable"] is counts
+
+
+def test_an_entered_heldout_count_needs_no_both_conjuncts_floor():
+    h = _mvv(_issue_rows(label="a"), _issue_rows(label="b"), _held(6, entered=(0,), invalid=()))["heldout"]
+    assert h["entered"] == 1 and h["interpretable"] is True
+
+
+def test_ground_truth_scores_answered_rows_by_whole_items_split_by_the_join():
+    rows = _held(4, entered=(), invalid=())
+    rows[0].update(ground_truth=["eid_0000000a", "eid_0000000b"], final_text="eid_0000000a and eid_0000000c",
+                   generated_on_join=True)
+    rows[1].update(ground_truth=["eid_0000000d"], final_text="[non-answer: uncovered] nothing")
+    rows[2].update(ground_truth=["https://github.com/salesforce/SearchFlow/pull/1"],
+                   final_text="see https://github.com/salesforce/SearchFlow/pull/11")
+    rows[3].update(ground_truth="a prose answer", final_text="prose")
+    g = herb_ladder.heldout_report(rows, {"a": {"issue_entered": 1}})["ground_truth"]
+    assert g["with_ground_truth"] == 3 and g["answered"] == 2
+    assert g["on_join"] == {"answered": 1, "recall": 0.5, "precision": 0.5}
+    assert g["not_on_join"] == {"answered": 1, "recall": 0.0, "precision": 0.0}, "pull/1 is not pull/11"
+
+
+def test_ground_truth_is_none_without_a_list_ground_truth():
+    assert herb_ladder.heldout_report(_held(3, invalid=()), {"a": {"issue_entered": 1}})["ground_truth"] is None
+
+
+def test_the_key_arm_runs_in_run_mvv_records_its_conjuncts_and_resumes_without_rerunning(monkeypatch):
+    log: list = []
+    lib = FakeLibrary([BUILTIN], log)
+    rep = {"outcome": "no_new_evidence", "reason": "unsupported", "resolution_reason": "no_key_tokens"}
+    ans = FakeAnswer(lib, log, repair=rep, cost=0.05, final="eid_0000000a")
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", ans)
+    held = [{"herb_index": 0, "question": "h0", "type": "content", "ground_truth": "g", "citations": ["c"]}]
+    key = [{"herb_index": 30 + i, "question": f"k{i}", "type": "person", "ground_truth": ["eid_0000000a"],
+            "citations": ["c"], "cited_keys": 1} for i in range(3)]
+    mvv = herb_ladder.run_mvv(_issue_qs(), ["Acme"], {"CUST-1": "Acme"}, held, 4.0, lib, key_heldout=key)
+    kh = mvv["score"]["key_heldout"]
+    assert (kh["asked"], kh["n_valid"], kh["entered"], kh["both_conjuncts"]) == (3, 3, 0, 3)
+    assert kh["not_entered_reasons"] == {"no_key_tokens": 3}
+    # the fake's issue runs never enter either, so only that reason is left; the both-conjuncts floor is met
+    assert not any("both conjuncts" in r for r in kh["reasons"]) and any("issue_entered" in r for r in kh["reasons"])
+    assert kh["ground_truth"]["recall"] == 1.0
+    assert [r["run_label"] for r in mvv["heldout_rows"]] == ["heldout", "key_heldout", "key_heldout", "key_heldout"]
+    assert mvv["meta"]["complete"] is True
+    assert any(r["metric"] == "key_heldout_branch_entered" for r in herb_ladder.mvv_rungs(mvv["score"]))
+    prior = {(r["run_label"], r["question"]): r for r in mvv["rows"]["a"] + mvv["rows"]["b"] + mvv["heldout_rows"]}
+    n = ans.n
+    again = herb_ladder.run_mvv(_issue_qs(), ["Acme"], {"CUST-1": "Acme"}, held, 4.0, lib, key_heldout=key, prior=prior)
+    assert ans.n == n, "a resume keeps valid key-arm rows and runs nothing"
+    assert again["score"]["key_heldout"]["both_conjuncts"] == 3
+
+
+def test_the_key_arm_shares_the_cap_and_is_charged_to_the_runs_ledger(monkeypatch):
+    """Review r2: the arm spends from the same budget (a small cap skips it) and its ledger rows count toward a
+    resume's cumulative cap (run mvv, the run id, stage key_heldout)."""
+    log: list = []
+    lib = FakeLibrary([BUILTIN], log)
+    monkeypatch.setattr(herb_ladder, "nx_answer_call", FakeAnswer(lib, log, cost=0.05))
+    held = [{"herb_index": 0, "question": "h0", "type": "content", "ground_truth": "g", "citations": ["c"]}]
+    key = [{"herb_index": 30, "question": "k0", "type": "person", "ground_truth": ["eid_0000000a"],
+            "citations": ["c"], "cited_keys": 1}]
+    mvv = herb_ladder.run_mvv(_issue_qs(), ["Acme"], {"CUST-1": "Acme"}, held, 4.0, lib, run_id=RUN_ID, key_heldout=key)
+    rows = [r for r in _settled(_ledger_rows()) if r.get("stage") == "key_heldout"]
+    assert len(rows) == 1 and rows[0]["run"] == "mvv" and rows[0]["mvv_run"] == RUN_ID
+    assert herb_ladder.ledger_spent(RUN_ID) == pytest.approx(mvv["meta"]["cumulative_cost_usd"])
+    spent = herb_ladder.ledger_spent(RUN_ID)
+    tight = herb_ladder.run_mvv(_issue_qs(), ["Acme"], {"CUST-1": "Acme"}, held, spent, lib, run_id=RUN_ID,
+                                key_heldout=key)
+    assert [r.get("skipped") for r in tight["heldout_rows"] if r["run_label"] == "key_heldout"] == ["cost cap reached"]
+
+
+def test_the_key_heldout_arm_selects_non_company_questions_whose_citations_name_a_key():
+    product = {
+        "slack": [{"id": "m1", "text": "CUST-0042 hit a bug"}, {"id": "m2", "text": "no key here"}],
+        "answerable_questions": [
+            {"question": "q0", "type": "person", "ground_truth": ["eid_1"], "citations": ["m1"]},
+            {"question": "q1", "type": "person", "ground_truth": ["eid_2"], "citations": ["m2"]},
+            {"question": "q2", "type": "company", "ground_truth": ["X"], "citations": ["m1"]},
+            {"question": "q3", "type": "pr", "ground_truth": ["u"], "citations": ["m1"]},
+        ],
+    }
+    qs = herb_ladder.key_heldout_questions(product, exclude={3})
+    assert [(q["herb_index"], q["cited_keys"]) for q in qs] == [(0, 1)]
+
+
+def test_the_frozen_key_heldout_fixture_loads_and_excludes_the_frozen_heldout_set():
+    key = herb_ladder.load_heldout(herb_ladder._GOLD_KEY_HELDOUT)
+    plain = {q["herb_index"] for q in herb_ladder.load_heldout()}
+    assert key and not ({q["herb_index"] for q in key} & plain)
+    assert all(q["type"] != "company" and q["cited_keys"] >= 1 for q in key)
 
 
 def test_a_heldout_set_with_no_valid_run_is_not_interpretable():
@@ -2495,7 +2628,8 @@ def test_the_plan_library_adapter_keeps_the_url_the_driver_reported(world, monke
 # --- --mvv: its own record, the scorecard patched in place, the Step 0 baselines left alone ---
 
 
-def _emit_world(monkeypatch, tmp_path, *, cost=0.05, fail_on=(), report=ANCHOR_REPORT, phases=("P1", "P2", "E2E-nx_answer")):
+def _emit_world(monkeypatch, tmp_path, *, cost=0.05, fail_on=(), report=ANCHOR_REPORT, phases=("P1", "P2", "E2E-nx_answer"),
+                key=()):
     results = tmp_path / "herb"
     results.mkdir()
     card = _card(*phases)
@@ -2517,7 +2651,7 @@ def _emit_world(monkeypatch, tmp_path, *, cost=0.05, fail_on=(), report=ANCHOR_R
     monkeypatch.setattr(herb_ladder, "_load_gold", lambda: {
         "members": {}, "cust_to_company": REGISTRY, "mentions": {}, "q_to_custs": {}})
     monkeypatch.setattr(herb_ladder, "_load_product", lambda: {"answerable_questions": questions})
-    monkeypatch.setattr(herb_ladder, "load_heldout", lambda: held)
+    monkeypatch.setattr(herb_ladder, "load_heldout", lambda path=None: held if path is None else list(key))
     monkeypatch.setattr(herb_ladder, "service_versions", lambda: dict(_VERSIONS))
     monkeypatch.setenv("HERB_NEXUS_REV", REV)
     monkeypatch.setattr(herb_ladder, "nx_answer_call", ans)
@@ -2537,6 +2671,17 @@ def test_emit_mvv_writes_its_own_record_and_leaves_the_step0_baselines_alone(mon
     assert rec["meta"]["nx_version"] == _VERSIONS["nx_version"] and rec["meta"]["run_id"] == RUN_ID
     assert len((w.results / f"mvv-{RUN_ID}.jsonl").read_text().splitlines()) == 15
     assert out["verdict"] == "passed"
+
+
+def test_emit_mvv_runs_the_frozen_key_arm_and_records_its_rows(monkeypatch, tmp_path):
+    """Review r2: emit_mvv loads the key-bearing fixture and hands it to run_mvv."""
+    key = [{"herb_index": 30, "question": "k0", "type": "person", "ground_truth": ["eid_0000000a"],
+            "citations": ["c"], "cited_keys": 1}]
+    w = _emit_world(monkeypatch, tmp_path, key=key)
+    herb_ladder.emit_mvv(cap_usd=4.0, date=RUN_ID, plan_library=w.lib)
+    rec = json.loads((w.results / f"mvv-{RUN_ID}.json").read_text())
+    assert [r["question"] for r in rec["heldout_rows"] if r["run_label"] == "key_heldout"] == ["k0"]
+    assert rec["score"]["key_heldout"]["asked"] == 1 and w.ans.n == 2 * 7 + 1 + 1
 
 
 def test_emit_mvv_patches_only_the_mvv_rungs_and_section_into_the_scorecard(monkeypatch, tmp_path):

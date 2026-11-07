@@ -25,8 +25,8 @@ metric computes to its RED baseline; the harness is the oracle, not the implemen
 
 The RDR-147 MVV (``--mvv``, nexus-bwct4.1) runs every issue question twice (labels a and b) with
 every grown plan soft-disabled before each run, then scores join completeness and precision (verdict
-passed, failed or invalid), and counts how often the resolution branch fires on a frozen single-hop
-held-out set. It writes ``results/herb/mvv-<date>.json`` and patches only the MVV rungs into the scorecard
+passed, failed or invalid), and counts how often the resolution branch fires on a frozen non-company
+held-out set and on a key-bearing arm (nexus-bwct4.4). It writes ``results/herb/mvv-<date>.json`` and patches only the MVV rungs into the scorecard
 (``emit_mvv``); the Step 0 baselines are never rewritten by it. The rules are in
 ``benchmark/README-herb.md`` (section "The RDR-147 MVV").
 
@@ -94,6 +94,7 @@ _GOLD_MEMBERS = _FIXTURE_DIR / "p2_member_customers.json"
 _GOLD_MENTIONS = _FIXTURE_DIR / "artifact_mentions.json"
 _GOLD_Q_CUSTOMERS = _FIXTURE_DIR / "question_to_affected_customers.json"
 _GOLD_HELDOUT = _FIXTURE_DIR / "single_hop_heldout.json"
+_GOLD_KEY_HELDOUT = _FIXTURE_DIR / "single_hop_key_heldout.json"
 _RESULTS_DIR = Path(__file__).parent.parent / "results" / "herb"
 _SCORECARD = _RESULTS_DIR / "herb-scorecard.json"
 _BASELINES = _RESULTS_DIR / "step0-baselines.json"
@@ -133,6 +134,18 @@ MAX_DOMAIN_MISSES = 1            # join completeness: at most this many in-domai
                                  # (Sam 2026-11-05, T2 nexus/rdr147-mvv-bar-revision-2026-11-05: assessor variance)
 PRECISION_GATE = 0.95            # per-run mean of per-question precision over the questions that named a company
 HELDOUT_LIMIT = 20               # the single-hop held-out set: the first 20 non-company SearchFlow questions
+# nexus-bwct4.4: a held-out zero reads only when at least this many valid rows had BOTH conjuncts of the branch's
+# gate, each measured apart from whether the branch entered: a facet was unsupported (the repair report's reason
+# names unsupported facets) AND the evidence named a customer key. Picked, not derived: 3 of the key arm's 8, so one
+# or two stray rows do not make a zero read. ``anchor_key_ids`` cannot serve: nexus sets it only when the branch
+# entered (coverage_ledger.py, the entered path), so it would make every zero read uninterpretable.
+HELDOUT_MIN_BOTH_CONJUNCTS = 3
+_UNSUPPORTED_REASONS = frozenset({"unsupported", "unsupported_and_unread_tail"})
+#: Repair outcomes that never reached the branch (no repair, or one skipped or refused before it ran); a row with
+#: one of these is not counted as holding the unsupported-facet conjunct even when its reason names unsupported facets.
+_REPAIR_NOT_RUN = frozenset({"", "not_attempted", "unavailable", "skipped_deadline", "skipped_budget"})
+#: The items a HERB single-hop ground truth lists: employee ids and PR links, matched whole.
+_GT_ITEM_RE = re.compile(r"eid_[0-9a-f]{8}\b|https://github\.com/[\w.-]+/[\w.-]+/pull/\d+\b")
 MVV_CAP_USD = 4.0                # spend cap of the MVV run
 # The script's issue5 F1 (step0-baselines.json): the diagnostic baseline the nx_answer F1 is reported beside.
 # A deterministic rung, asserted exactly by the paired pytest.
@@ -146,7 +159,7 @@ REPAIR_FIELDS = ("resolution_entered", "resolution_reason", "resolution_tokens",
                  "missing", "ambiguous", "joined_added", "items_merged", "repair_outcome", "joined_dropped",
                  "tokens_dropped", "anchors_scanned", "anchors_without_pattern", "anchor_key_ids_truncated",
                  "resolved_truncated", "missing_truncated", "ambiguous_truncated", "joined_dropped_truncated",
-                 "tokens_dropped_truncated", "generated_on_join")
+                 "tokens_dropped_truncated", "generated_on_join", "repair_reason")
 _TRUNCATED_LISTS = ("anchor_key_ids", "resolved", "missing", "ambiguous", "joined_dropped", "tokens_dropped")
 MVV_LEDGER_LABEL = "mvv"         # every MVV call's cost-ledger label (nexus-irndi); the stage is beside it
 PER_CALL_BUDGET_USD = 0.5        # nx_answer's soft per-call budget; also what a call of unknown cost is charged
@@ -216,6 +229,48 @@ def held_out_questions(product: dict[str, Any], limit: int = HELDOUT_LIMIT) -> l
     return out
 
 
+def _artifact_texts(product: dict[str, Any]) -> dict[str, list[str]]:
+    """Every artifact of *product* by its id (the ids HERB citations name), as JSON text, for a key scan."""
+    out: dict[str, list[str]] = {}
+
+    def walk(x: Any) -> None:
+        if isinstance(x, dict):
+            for k in ("id", "utterranceID", "message_id", "transcript_id", "pr_id", "document_id"):
+                if isinstance(x.get(k), str):
+                    out.setdefault(x[k], []).append(json.dumps(x))
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+
+    for section in ("slack", "documents", "meeting_transcripts", "meeting_chats", "urls", "prs", "customers"):
+        walk(product.get(section, []))
+    return out
+
+
+def key_heldout_questions(product: dict[str, Any], exclude: set[int] | None = None) -> list[dict[str, Any]]:
+    """The key-bearing held-out arm (nexus-bwct4.4): answerable questions whose type is not ``company``, not in
+    *exclude* (the frozen held-out set's ``herb_index``), whose cited artifacts name at least one customer key
+    (``CUST-\\d{4}``), in file order. Each carries ``cited_keys``, how many distinct keys its citations name.
+
+    A citation naming a key is a pre-selection, not a guarantee: the gate reads the retrieved coverage anchors,
+    which the run decides. Hop count is not tested (the non-company type is all "single-hop" means here), and two of
+    the SearchFlow eight (herb_index 39 and 42) are whole-product aggregations ("the maximum number of ...")."""
+    texts = _artifact_texts(product)
+    exclude = exclude or set()
+    out = []
+    for i, q in enumerate(product["answerable_questions"]):
+        if q.get("type") == "company" or i in exclude:
+            continue
+        keys = {k for c in q.get("citations", []) for t in texts.get(c, []) for k in _RE_CUST.findall(t)}
+        if keys:
+            out.append({"herb_index": i, "question": q["question"], "type": q.get("type"),
+                        "ground_truth": q["ground_truth"], "citations": q.get("citations", []),
+                        "cited_keys": len(keys)})
+    return out
+
+
 def _heldout_digest(questions: list[dict[str, Any]]) -> str:
     import hashlib
 
@@ -238,6 +293,26 @@ def freeze_heldout(product: dict[str, Any] | None = None, path: Path | None = No
     fx = {"product": PRODUCT, "source": f"data/products/{PRODUCT}.json", "herb_commit": commit,
           "selection": f"answerable_questions whose type is not 'company', in file order, first {HELDOUT_LIMIT}",
           "n_non_company_in_source": sum(1 for q in product["answerable_questions"] if q.get("type") != "company"),
+          "sha256": _heldout_digest(qs), "questions": qs}
+    path.write_text(json.dumps(fx, indent=2) + "\n")
+    return fx
+
+
+def freeze_key_heldout(product: dict[str, Any] | None = None, path: Path | None = None) -> dict[str, Any]:
+    """Write the key-bearing held-out fixture once (frozen like :func:`freeze_heldout`)."""
+    path = path or _GOLD_KEY_HELDOUT
+    if path.exists():
+        raise NxError(f"{path} exists: the key-bearing held-out set is frozen")
+    product = product or _load_product()
+    qs = key_heldout_questions(product, {q["herb_index"] for q in load_heldout()})
+    try:
+        commit = subprocess.run(["git", "-C", str(HERB_DIR), "rev-parse", "HEAD"], capture_output=True,
+                                timeout=30, check=True).stdout.decode().strip()
+    except Exception:  # noqa: BLE001 - provenance only; a source that is not a checkout records none
+        commit = ""
+    fx = {"product": PRODUCT, "source": f"data/products/{PRODUCT}.json", "herb_commit": commit,
+          "selection": "answerable_questions whose type is not 'company', outside single_hop_heldout.json, whose "
+                       "cited artifacts name a CUST-\\d{4} key, in file order (nexus-bwct4.4)",
           "sha256": _heldout_digest(qs), "questions": qs}
     path.write_text(json.dumps(fx, indent=2) + "\n")
     return fx
@@ -1024,6 +1099,9 @@ def repair_columns(report: Any) -> dict[str, Any]:
         "anchors_without_pattern": count(rep.get("anchors_without_pattern")),
         # RDR-147 option 1 (Sam 2026-11-05): the answer was generated on an exact-key join the re-check did not cover
         "generated_on_join": rep.get("generated_on_join") is True,
+        # nexus-bwct4.4: why the repair ran (``unsupported``, ``unread_tail``, ``unsupported_and_unread_tail``; empty
+        # when none ran). Unlike ``anchor_key_ids``, set whether or not the resolution branch entered.
+        "repair_reason": text(rep.get("reason")),
     }
     for name in _TRUNCATED_LISTS:
         cols[f"{name}_truncated"] = count(rep.get(f"{name}_truncated"))
@@ -1225,7 +1303,7 @@ def run_heldout_rows(
     sink: MvvRows | None = None,
     prior: Mapping[tuple[str, str], Mapping[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """The single-hop held-out questions, each run ONCE with the resolution switch on (the environment's),
+    """The held-out questions (either arm), each run ONCE with the resolution switch on (the environment's),
     behind the same grown-plan sweep. Rows record the plan, validity and RepairReport columns; they are not
     scored against a gold (the count is of runs where the branch entered)."""
     budget = budget if budget is not None else Budget(cap_usd)
@@ -1239,7 +1317,8 @@ def run_heldout_rows(
             sink.append(row)
 
     for q in heldout:
-        base = {"herb_index": q["herb_index"], "question": q["question"], "type": q.get("type"), "run_label": label}
+        base = {"herb_index": q["herb_index"], "question": q["question"], "type": q.get("type"), "run_label": label,
+                "ground_truth": q.get("ground_truth")}
         kept = _kept(prior, label, q["question"])
         if kept is not None:
             rows.append(kept)
@@ -1253,8 +1332,11 @@ def run_heldout_rows(
                                             timeout=timeout)
         land({**base, "final_text": env.get("final_text"), "step_count": env.get("step_count"),
               "cost_usd": cost, "cost_charged_usd": charged, "coverage_state": env.get("coverage_state"),
-              "coverage_reason": env.get("coverage_reason"), **cols})
-        console.print(f"  heldout cost {cost} (charged {charged:.4f}, total {budget.spent:.4f}) "
+              "coverage_reason": env.get("coverage_reason"),
+              # nexus-bwct4.4: the key conjunct, read from the evidence apart from whether the branch entered
+              "evidence_key_ids": sorted({k for t in env.get("evidence_texts") or [] for k in _RE_CUST.findall(t or "")}),
+              **cols})
+        console.print(f"  {label} cost {cost} (charged {charged:.4f}, total {budget.spent:.4f}) "
                       f"valid={cols['valid']} entered={cols['resolution_entered']}  {q['question'][:50]}")
     meta = {"total_cost_usd": round(budget.spent - start, 6), "cumulative_cost_usd": round(budget.spent, 6),
             "cap_usd": budget.cap, "runs_with_unknown_cost": budget.unknown_cost_calls - unknown0,
@@ -1444,12 +1526,29 @@ def heldout_report(rows: list[dict[str, Any]], runs: Mapping[str, Any], n_asked:
     """The held-out count as entered of valid of asked, never as a bare number: ``n_valid``, ``n_skipped`` (cap),
     ``n_invalid`` (failed or on a grown plan), ``entered`` (valid rows where the branch entered), why the
     others did not (``not_entered_reasons``, by ``resolution_reason``), and whether the count reads at all.
-    A zero is ``interpretable: false`` when no held-out run was valid, or when the branch entered no issue
-    question in either run (the switch or the entity pattern may be mis-set, and a zero then says nothing)."""
+    A zero is ``interpretable: false`` when no held-out run was valid, when the branch entered no issue
+    question in either run (the switch or the entity pattern may be mis-set, and a zero then says nothing), or
+    when fewer than :data:`HELDOUT_MIN_BOTH_CONJUNCTS` valid rows had both conjuncts of the gate (nexus-bwct4.4):
+    ``unsupported_facet`` (the repair report's ``repair_reason`` names unsupported facets) and ``evidence_keys`` (the
+    row's evidence texts name a customer key), each counted apart from whether the branch entered, and
+    ``both_conjuncts`` where both held. A repair that never reached the branch (``_REPAIR_NOT_RUN``) does not count.
+    Evidence keys differ from the keys in the anchors the gate scans (other chunks, a fixed ``CUST-\\d{4}`` pattern),
+    so a row with both that did not enter may be the anchor-only scan Sam kept (nexus-z938f) or a pattern mismatch;
+    ``not_entered_reasons`` (``no_key_tokens``) is where to look. For rows whose ground truth is a list of items (employee ids, PR links, matched
+    whole), ``ground_truth`` gives answered rows' mean recall and precision, overall and split by
+    ``generated_on_join``; ``None`` when no row has such a ground truth."""
     valid = [r for r in rows if _usable(r)]
     reasons: list[str] = []
     if not valid:
         reasons.append("no valid held-out run")
+    unsupported = [r for r in valid if r.get("repair_reason") in _UNSUPPORTED_REASONS
+                   and r.get("repair_outcome") not in _REPAIR_NOT_RUN]
+    keyed = [r for r in valid if r.get("evidence_key_ids")]
+    both = sum(1 for r in unsupported if r.get("evidence_key_ids"))
+    entered = sum(1 for r in valid if r.get("resolution_entered") is True)
+    if valid and entered == 0 and both < HELDOUT_MIN_BOTH_CONJUNCTS:
+        reasons.append(f"{both} valid rows had both conjuncts of the gate (an unsupported facet AND customer keys in "
+                       f"the evidence), fewer than {HELDOUT_MIN_BOTH_CONJUNCTS}: the zero could not have failed")
     if not any(runs[lb]["issue_entered"] for lb in RUN_LABELS if lb in runs):
         reasons.append("issue_entered is 0 in both runs: the switch or the entity pattern may be mis-set, "
                        "so a held-out zero is not evidence of anything")
@@ -1461,11 +1560,42 @@ def heldout_report(rows: list[dict[str, Any]], runs: Mapping[str, Any], n_asked:
     return {"asked": len(rows) if n_asked is None else n_asked, "n": len(rows), "n_valid": len(valid),
             "n_skipped": sum(1 for r in rows if r.get("skipped")),
             "n_invalid": sum(1 for r in rows if not _usable(r) and not r.get("skipped")),
-            "entered": sum(1 for r in valid if r.get("resolution_entered") is True),
+            "entered": entered, "unsupported_facet": len(unsupported), "evidence_keys": len(keyed),
+            "both_conjuncts": both, "ground_truth": ground_truth_scores(valid),
             # RDR-147 R9: an entered join now answers; count answered held-out outcomes, not firings only
             "answered": sum(1 for r in valid if not str(r.get("final_text") or "").startswith("[non-answer:")),
             "answered_on_join": sum(1 for r in valid if r.get("generated_on_join") is True),
             "not_entered_reasons": not_entered, "interpretable": not reasons, "reasons": reasons}
+
+
+def ground_truth_scores(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Answered rows' mean recall and precision against a list ground truth, overall and by ``generated_on_join``
+    (nexus-bwct4.4). Items are matched whole (:data:`_GT_ITEM_RE`), so ``pull/1`` does not match ``pull/11``; a row
+    whose text names no item scores precision 0. ``None`` when no row has a list ground truth."""
+    scored: list[tuple[bool, float, float]] = []
+    n_with_gt = 0
+    for r in rows:
+        gt = r.get("ground_truth")
+        if not (isinstance(gt, list) and gt):
+            continue
+        n_with_gt += 1
+        text = str(r.get("final_text") or "")
+        if text.startswith("[non-answer:"):
+            continue
+        gold, named = {str(g) for g in gt}, set(_GT_ITEM_RE.findall(text))
+        hit = len(gold & named)
+        scored.append((r.get("generated_on_join") is True, hit / len(gold), hit / len(named) if named else 0.0))
+    if not n_with_gt:
+        return None
+
+    def mean(xs: list[float]) -> float | None:
+        return round(sum(xs) / len(xs), 4) if xs else None
+
+    def part(sel: list[tuple[bool, float, float]]) -> dict[str, Any]:
+        return {"answered": len(sel), "recall": mean([s[1] for s in sel]), "precision": mean([s[2] for s in sel])}
+
+    return {"with_ground_truth": n_with_gt, **part(scored),
+            "on_join": part([s for s in scored if s[0]]), "not_on_join": part([s for s in scored if not s[0]])}
 
 
 def score_mvv(rows_by_label: Mapping[str, list[dict[str, Any]]], cust_to_company: Mapping[str, str],
@@ -1505,8 +1635,10 @@ def score_mvv(rows_by_label: Mapping[str, list[dict[str, Any]]], cust_to_company
 def run_mvv(questions: list[dict[str, Any]], universe: list[str], cust_to_company: Mapping[str, str],
             heldout: list[dict[str, Any]], cap_usd: float, plan_library: Any, *, run_id: str | None = None,
             sink: MvvRows | None = None,
-            prior: Mapping[tuple[str, str], Mapping[str, Any]] | None = None) -> dict[str, Any]:
-    """Both labelled runs, then the held-out set, under one cap; return rows, held-out rows, meta, verdict.
+            prior: Mapping[tuple[str, str], Mapping[str, Any]] | None = None,
+            key_heldout: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Both labelled runs, then the held-out set, then the key-bearing held-out arm (*key_heldout*, nexus-bwct4.4),
+    under one cap; return rows, held-out rows, meta, verdict.
 
     Refuses (``NxError``) before any sweep, call or ledger row unless the resolution switch is on in this
     process's environment (``mvv_switch_violations``). With *run_id* the cap is cumulative over every
@@ -1521,11 +1653,17 @@ def run_mvv(questions: list[dict[str, Any]], universe: list[str], cust_to_compan
                                    sink=sink, prior=prior)
     held_rows, held_meta = run_heldout_rows(heldout, cap_usd, plan_library, budget=budget,
                                             ledger_label=MVV_LEDGER_LABEL, run_id=run_id, sink=sink, prior=prior)
-    return {"rows": rows, "heldout_rows": held_rows,
-            "score": score_mvv(rows, cust_to_company, held_rows, n_asked=len(heldout)),
+    key_rows, key_meta = run_heldout_rows(key_heldout or [], cap_usd, plan_library, label="key_heldout",
+                                          budget=budget, ledger_label=MVV_LEDGER_LABEL, run_id=run_id, sink=sink,
+                                          prior=prior)
+    score = score_mvv(rows, cust_to_company, held_rows, n_asked=len(heldout))
+    score["key_heldout"] = heldout_report(key_rows, score["runs"], len(key_heldout or []))
+    held_meta = {**held_meta, "key_heldout": key_meta}
+    return {"rows": rows, "heldout_rows": held_rows + key_rows,
+            "score": score,
             "meta": {"cap_usd": cap_usd, "total_cost_usd": round(budget.spent - start, 6),
                      "cumulative_cost_usd": round(budget.spent, 6), "nx_answer": meta, "heldout": held_meta,
-                     "complete": meta["complete"] and held_meta["complete"]}}
+                     "complete": meta["complete"] and held_meta["complete"] and key_meta["complete"]}}
 
 
 def copy_scorecard(dest_dir: Path) -> Path:
@@ -1668,6 +1806,16 @@ def mvv_rungs(score: dict[str, Any]) -> list[dict[str, Any]]:
              f"report ({held['entered']} entered of {held['n_valid']} valid of {held['asked']} asked; {read})",
              "BASELINE"),
     ]
+    key = score.get("key_heldout")
+    if key is not None:
+        kread = "interpretable" if key["interpretable"] else "not interpretable: " + "; ".join(key["reasons"])
+        rungs.append(Rung(
+            "MVV", "key_heldout_branch_entered", key["entered"] / key["n_valid"] if key["n_valid"] else None,
+            f"report ({key['entered']} entered, {key['both_conjuncts']} with both conjuncts "
+            f"({key['unsupported_facet']} unsupported, {key['evidence_keys']} keyed), of {key['n_valid']} valid of "
+            f"{key['asked']} asked; not entered {key['not_entered_reasons']}; ground truth {key['ground_truth']}; "
+            f"{kread})",
+            "BASELINE"))
     for lb in RUN_LABELS:
         if lb not in runs:
             continue
@@ -1862,10 +2010,11 @@ def emit_mvv(cap_usd: float = MVV_CAP_USD, date: str | None = None, resume: bool
     questions = company_questions(product)
     universe = sorted(set(gold["cust_to_company"].values()))
     heldout = load_heldout()
+    key_heldout = load_heldout(_GOLD_KEY_HELDOUT)
     versions = service_versions()
     library = plan_library if plan_library is not None else SandboxPlanLibrary()
     result = run_mvv(questions, universe, gold["cust_to_company"], heldout, cap_usd, library, run_id=date,
-                     sink=sink, prior=sink.load() if resume else None)
+                     sink=sink, prior=sink.load() if resume else None, key_heldout=key_heldout)
     meta = {**result["meta"], "run_id": date, "timestamp_utc": stamp.isoformat(), "resumed": resume,
             "nexus_revision": os.environ.get("HERB_NEXUS_REV"), **versions,
             "plan_service_url": getattr(library, "service_url", None), "product": PRODUCT, "collection": CORPUS,
@@ -1939,6 +2088,9 @@ def main() -> None:
     ap.add_argument("--freeze-heldout", action="store_true",
                     help="write benchmark/fixtures/herb/single_hop_heldout.json from ~/git/HERB and exit "
                          "(refuses when it exists: the set is frozen)")
+    ap.add_argument("--freeze-key-heldout", action="store_true",
+                    help="write benchmark/fixtures/herb/single_hop_key_heldout.json (the key-bearing held-out "
+                         "arm, nexus-bwct4.4) from ~/git/HERB and exit (refuses when it exists)")
     ap.add_argument("--copy-scorecard-to", metavar="DIR",
                     help="copy results/herb/herb-scorecard.json into DIR (nexus docs/rdr/evidence/rdr-147) and exit")
     ap.add_argument("--p2-resolve", action="store_true",
@@ -1954,6 +2106,9 @@ def main() -> None:
         return
     if args.freeze_heldout:
         freeze_heldout()
+        return
+    if args.freeze_key_heldout:
+        freeze_key_heldout()
         return
     if args.copy_scorecard_to:
         console.print(f"copied: {copy_scorecard(Path(args.copy_scorecard_to))}")

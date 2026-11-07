@@ -166,7 +166,26 @@ Rules, as the code applies them (`join_completeness`, `precision_gate`, `score_m
    Each question runs once behind the same sweep. The count is reported as entered of valid of asked, with the
    skipped and invalid counts and why the others did not enter (`not_entered_reasons`), and is marked **not
    interpretable** when no held-out run was valid or when the branch entered no issue question in either
-   run (a mis-set switch or pattern would read the same as a correct zero).
+   run (a mis-set switch or pattern would read the same as a correct zero), or when fewer than
+   `HELDOUT_MIN_BOTH_CONJUNCTS` (3, picked: a few stray rows must not make a zero read) valid rows had both
+   conjuncts of the branch's gate, each read apart from whether the branch entered (nexus-bwct4.4):
+   `unsupported_facet` (the repair report's `reason` names unsupported facets and its outcome shows the repair
+   ran: not `not_attempted`, `unavailable`, `skipped_deadline` or `skipped_budget`) and `evidence_keys` (the row's
+   evidence texts name a `CUST-\d{4}` key). The report's `anchor_key_ids` cannot serve: nexus sets it only when
+   the branch entered. Evidence keys differ from the keys in the anchors the gate scans (other chunks, a fixed
+   pattern), so a row with both that did not enter may be the anchor-only scan Sam kept (nexus-z938f) or a
+   pattern mismatch; `not_entered_reasons` (`no_key_tokens`) is where to look. The final 2026-11-06 MVV recorded
+   neither field, so its 0 of 20 cannot be re-read this way: 12 of its 20 rows had an unsupported facet whose
+   anchors named no key (`no_key_tokens`) and 8 were `not_attempted`.
+   **Key-bearing held-out arm.** `fixtures/herb/single_hop_key_heldout.json` (frozen the same way;
+   `--freeze-key-heldout`) holds the non-company questions outside that set whose cited artifacts name a
+   `CUST-\d{4}` key: 8 SearchFlow questions (herb_index 29, 31, 33, 35, 37, 38, 39, 42; 39 and 42 are
+   whole-product aggregations). A cited key is a pre-selection, not a guarantee that the retrieved anchors hold
+   one, and hop count is not tested. The arm runs after the held-out set under the same cap and is reported as
+   `key_heldout`, with the conjunct counts and `ground_truth`: answered rows' mean recall and precision over
+   HERB's listed items (employee ids, PR links, matched whole), overall and split by `generated_on_join`. It
+   measures whether the branch fires on these questions and whether answers generated on a join stay correct;
+   it has no switch-off baseline.
 10. **Exact assertions only for deterministic rungs** (P2, P3, the script, both oracles: `PREDICTIONS`).
     nx_answer and aggregation rows are recorded with their run label and never asserted exactly
     (`NX_ANSWER_PREDICTIONS`, `asserted_exactly: false` in the comparison).
