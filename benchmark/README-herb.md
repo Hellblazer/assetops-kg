@@ -167,15 +167,23 @@ Rules, as the code applies them (`join_completeness`, `precision_gate`, `score_m
    skipped and invalid counts and why the others did not enter (`not_entered_reasons`), and is marked **not
    interpretable** when no held-out run was valid or when the branch entered no issue question in either
    run (a mis-set switch or pattern would read the same as a correct zero), or when fewer than
-   `HELDOUT_MIN_BOTH_CONJUNCTS` (1) valid rows had both conjuncts of the branch's gate, a repair (an
-   unsupported facet) AND entity keys in the anchors (`both_conjuncts`): with none, no row could have entered,
-   so a zero cannot fail (nexus-bwct4.4; the final 2026-11-06 MVV's 0 of 20 had none).
+   `HELDOUT_MIN_BOTH_CONJUNCTS` (3, picked: a few stray rows must not make a zero read) valid rows had both
+   conjuncts of the branch's gate, each read apart from whether the branch entered (nexus-bwct4.4):
+   `unsupported_facet` (the repair report's `reason` names unsupported facets; nexus's default outcome
+   `not_attempted` is not one) and `evidence_keys` (the row's evidence texts name a `CUST-\d{4}` key). The
+   report's `anchor_key_ids` cannot serve: nexus sets it only when the branch entered. Evidence keys
+   over-approximate the anchors the gate scans, so a row with both that did not enter can be the anchor-only scan
+   Sam kept (nexus-z938f); its `not_entered_reasons` entry, `no_key_tokens`, says which. The final 2026-11-06
+   MVV's 0 of 20 had no row with both.
    **Key-bearing held-out arm.** `fixtures/herb/single_hop_key_heldout.json` (frozen the same way;
-   `--freeze-key-heldout`) holds the single-hop questions outside that set whose cited artifacts name a
-   `CUST-\d{4}` key: 8 SearchFlow questions (herb_index 29, 31, 33, 35, 37, 38, 39, 42), so the gate's key
-   conjunct can hold. It runs after the held-out set under the same cap and is reported as its own count
-   (`key_heldout`: entered, `both_conjuncts`, and `ground_truth_recall`, the mean share of each answered row's
-   ground-truth items its text names), so an answer generated on a join is checked against HERB's truth.
+   `--freeze-key-heldout`) holds the non-company questions outside that set whose cited artifacts name a
+   `CUST-\d{4}` key: 8 SearchFlow questions (herb_index 29, 31, 33, 35, 37, 38, 39, 42; 39 and 42 are
+   whole-product aggregations). A cited key is a pre-selection, not a guarantee that the retrieved anchors hold
+   one, and hop count is not tested. The arm runs after the held-out set under the same cap and is reported as
+   `key_heldout`, with the conjunct counts and `ground_truth`: answered rows' mean recall and precision over
+   HERB's listed items (employee ids, PR links, matched whole), overall and split by `generated_on_join`. It
+   measures whether the branch fires on these questions and whether answers generated on a join stay correct;
+   it has no switch-off baseline.
 10. **Exact assertions only for deterministic rungs** (P2, P3, the script, both oracles: `PREDICTIONS`).
     nx_answer and aggregation rows are recorded with their run label and never asserted exactly
     (`NX_ANSWER_PREDICTIONS`, `asserted_exactly: false` in the comparison).

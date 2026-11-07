@@ -135,9 +135,14 @@ MAX_DOMAIN_MISSES = 1            # join completeness: at most this many in-domai
 PRECISION_GATE = 0.95            # per-run mean of per-question precision over the questions that named a company
 HELDOUT_LIMIT = 20               # the single-hop held-out set: the first 20 non-company SearchFlow questions
 # nexus-bwct4.4: a held-out zero reads only when at least this many valid rows had BOTH conjuncts of the branch's
-# gate (the repair ran, so a facet was unsupported, AND the anchors named an entity key). The final MVV's 0 of 20
-# had none, so it could not have failed.
-HELDOUT_MIN_BOTH_CONJUNCTS = 1
+# gate, each measured apart from whether the branch entered: a facet was unsupported (the repair report's reason
+# names unsupported facets) AND the evidence named a customer key. Picked, not derived: 3 of the key arm's 8, so one
+# or two stray rows do not make a zero read. ``anchor_key_ids`` cannot serve: nexus sets it only when the branch
+# entered (coverage_ledger.py, the entered path), so it would make every zero read uninterpretable.
+HELDOUT_MIN_BOTH_CONJUNCTS = 3
+_UNSUPPORTED_REASONS = frozenset({"unsupported", "unsupported_and_unread_tail"})
+#: The items a HERB single-hop ground truth lists: employee ids and PR links, matched whole.
+_GT_ITEM_RE = re.compile(r"eid_[0-9a-f]{8}\b|https://github\.com/[\w.-]+/[\w.-]+/pull/\d+\b")
 MVV_CAP_USD = 4.0                # spend cap of the MVV run
 # The script's issue5 F1 (step0-baselines.json): the diagnostic baseline the nx_answer F1 is reported beside.
 # A deterministic rung, asserted exactly by the paired pytest.
@@ -151,7 +156,7 @@ REPAIR_FIELDS = ("resolution_entered", "resolution_reason", "resolution_tokens",
                  "missing", "ambiguous", "joined_added", "items_merged", "repair_outcome", "joined_dropped",
                  "tokens_dropped", "anchors_scanned", "anchors_without_pattern", "anchor_key_ids_truncated",
                  "resolved_truncated", "missing_truncated", "ambiguous_truncated", "joined_dropped_truncated",
-                 "tokens_dropped_truncated", "generated_on_join")
+                 "tokens_dropped_truncated", "generated_on_join", "repair_reason")
 _TRUNCATED_LISTS = ("anchor_key_ids", "resolved", "missing", "ambiguous", "joined_dropped", "tokens_dropped")
 MVV_LEDGER_LABEL = "mvv"         # every MVV call's cost-ledger label (nexus-irndi); the stage is beside it
 PER_CALL_BUDGET_USD = 0.5        # nx_answer's soft per-call budget; also what a call of unknown cost is charged
@@ -242,10 +247,13 @@ def _artifact_texts(product: dict[str, Any]) -> dict[str, list[str]]:
 
 
 def key_heldout_questions(product: dict[str, Any], exclude: set[int] | None = None) -> list[dict[str, Any]]:
-    """The key-bearing single-hop arm (nexus-bwct4.4): answerable questions whose type is not ``company``, not in
+    """The key-bearing held-out arm (nexus-bwct4.4): answerable questions whose type is not ``company``, not in
     *exclude* (the frozen held-out set's ``herb_index``), whose cited artifacts name at least one customer key
-    (``CUST-\\d{4}``), in file order. Each carries ``cited_keys``, how many distinct keys its citations name. These
-    are the single-hop questions where the branch's key conjunct can hold, so their count can fail."""
+    (``CUST-\\d{4}``), in file order. Each carries ``cited_keys``, how many distinct keys its citations name.
+
+    A citation naming a key is a pre-selection, not a guarantee: the gate reads the retrieved coverage anchors,
+    which the run decides. Hop count is not tested (the non-company type is all "single-hop" means here), and two of
+    the SearchFlow eight (herb_index 39 and 42) are whole-product aggregations ("the maximum number of ...")."""
     texts = _artifact_texts(product)
     exclude = exclude or set()
     out = []
@@ -1088,6 +1096,9 @@ def repair_columns(report: Any) -> dict[str, Any]:
         "anchors_without_pattern": count(rep.get("anchors_without_pattern")),
         # RDR-147 option 1 (Sam 2026-11-05): the answer was generated on an exact-key join the re-check did not cover
         "generated_on_join": rep.get("generated_on_join") is True,
+        # nexus-bwct4.4: why the repair ran (``unsupported``, ``unread_tail``, ``unsupported_and_unread_tail``; empty
+        # when none ran). Unlike ``anchor_key_ids``, set whether or not the resolution branch entered.
+        "repair_reason": text(rep.get("reason")),
     }
     for name in _TRUNCATED_LISTS:
         cols[f"{name}_truncated"] = count(rep.get(f"{name}_truncated"))
@@ -1318,8 +1329,11 @@ def run_heldout_rows(
                                             timeout=timeout)
         land({**base, "final_text": env.get("final_text"), "step_count": env.get("step_count"),
               "cost_usd": cost, "cost_charged_usd": charged, "coverage_state": env.get("coverage_state"),
-              "coverage_reason": env.get("coverage_reason"), **cols})
-        console.print(f"  heldout cost {cost} (charged {charged:.4f}, total {budget.spent:.4f}) "
+              "coverage_reason": env.get("coverage_reason"),
+              # nexus-bwct4.4: the key conjunct, read from the evidence apart from whether the branch entered
+              "evidence_key_ids": sorted({k for t in env.get("evidence_texts") or [] for k in _RE_CUST.findall(t or "")}),
+              **cols})
+        console.print(f"  {label} cost {cost} (charged {charged:.4f}, total {budget.spent:.4f}) "
                       f"valid={cols['valid']} entered={cols['resolution_entered']}  {q['question'][:50]}")
     meta = {"total_cost_usd": round(budget.spent - start, 6), "cumulative_cost_usd": round(budget.spent, 6),
             "cap_usd": budget.cap, "runs_with_unknown_cost": budget.unknown_cost_calls - unknown0,
@@ -1511,25 +1525,25 @@ def heldout_report(rows: list[dict[str, Any]], runs: Mapping[str, Any], n_asked:
     others did not (``not_entered_reasons``, by ``resolution_reason``), and whether the count reads at all.
     A zero is ``interpretable: false`` when no held-out run was valid, when the branch entered no issue
     question in either run (the switch or the entity pattern may be mis-set, and a zero then says nothing), or
-    when fewer than :data:`HELDOUT_MIN_BOTH_CONJUNCTS` valid rows had both conjuncts of the gate
-    (``both_conjuncts``: the repair ran AND the anchors named a key; nexus-bwct4.4), since then no row could have
-    entered. ``ground_truth_recall`` is the mean share of each answered row's ground-truth items its text names,
-    over rows that carry a ground truth (the key arm's), else ``None``."""
+    when fewer than :data:`HELDOUT_MIN_BOTH_CONJUNCTS` valid rows had both conjuncts of the gate (nexus-bwct4.4):
+    ``unsupported_facet`` (the repair report's ``repair_reason`` names unsupported facets) and ``evidence_keys`` (the
+    row's evidence texts name a customer key), each counted apart from whether the branch entered, and
+    ``both_conjuncts`` where both held. Evidence keys over-approximate the anchors the gate scans, so a row with both
+    that did not enter may be the anchor-only scan Sam kept (nexus-z938f): its ``not_entered_reasons`` entry
+    (``no_key_tokens``) says so. For rows whose ground truth is a list of items (employee ids, PR links, matched
+    whole), ``ground_truth`` gives answered rows' mean recall and precision, overall and split by
+    ``generated_on_join``; ``None`` when no row has such a ground truth."""
     valid = [r for r in rows if _usable(r)]
     reasons: list[str] = []
     if not valid:
         reasons.append("no valid held-out run")
-    both = sum(1 for r in valid if r.get("repair_outcome") and r.get("anchor_key_ids"))
+    unsupported = [r for r in valid if r.get("repair_reason") in _UNSUPPORTED_REASONS]
+    keyed = [r for r in valid if r.get("evidence_key_ids")]
+    both = sum(1 for r in unsupported if r.get("evidence_key_ids"))
     entered = sum(1 for r in valid if r.get("resolution_entered") is True)
     if valid and entered == 0 and both < HELDOUT_MIN_BOTH_CONJUNCTS:
-        reasons.append(f"{both} valid rows had both conjuncts of the gate (a repair AND anchor keys), fewer than "
-                       f"{HELDOUT_MIN_BOTH_CONJUNCTS}: no row could have entered, so the zero cannot fail")
-    recalls = []
-    for r in valid:
-        gt = r.get("ground_truth")
-        text = str(r.get("final_text") or "")
-        if isinstance(gt, list) and gt and not text.startswith("[non-answer:"):
-            recalls.append(sum(1 for g in gt if str(g) in text) / len(gt))
+        reasons.append(f"{both} valid rows had both conjuncts of the gate (an unsupported facet AND customer keys in "
+                       f"the evidence), fewer than {HELDOUT_MIN_BOTH_CONJUNCTS}: the zero could not have failed")
     if not any(runs[lb]["issue_entered"] for lb in RUN_LABELS if lb in runs):
         reasons.append("issue_entered is 0 in both runs: the switch or the entity pattern may be mis-set, "
                        "so a held-out zero is not evidence of anything")
@@ -1541,12 +1555,42 @@ def heldout_report(rows: list[dict[str, Any]], runs: Mapping[str, Any], n_asked:
     return {"asked": len(rows) if n_asked is None else n_asked, "n": len(rows), "n_valid": len(valid),
             "n_skipped": sum(1 for r in rows if r.get("skipped")),
             "n_invalid": sum(1 for r in rows if not _usable(r) and not r.get("skipped")),
-            "entered": entered, "both_conjuncts": both,
-            "ground_truth_recall": round(sum(recalls) / len(recalls), 4) if recalls else None,
+            "entered": entered, "unsupported_facet": len(unsupported), "evidence_keys": len(keyed),
+            "both_conjuncts": both, "ground_truth": ground_truth_scores(valid),
             # RDR-147 R9: an entered join now answers; count answered held-out outcomes, not firings only
             "answered": sum(1 for r in valid if not str(r.get("final_text") or "").startswith("[non-answer:")),
             "answered_on_join": sum(1 for r in valid if r.get("generated_on_join") is True),
             "not_entered_reasons": not_entered, "interpretable": not reasons, "reasons": reasons}
+
+
+def ground_truth_scores(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Answered rows' mean recall and precision against a list ground truth, overall and by ``generated_on_join``
+    (nexus-bwct4.4). Items are matched whole (:data:`_GT_ITEM_RE`), so ``pull/1`` does not match ``pull/11``; a row
+    whose text names no item scores precision 0. ``None`` when no row has a list ground truth."""
+    scored: list[tuple[bool, float, float]] = []
+    n_with_gt = 0
+    for r in rows:
+        gt = r.get("ground_truth")
+        if not (isinstance(gt, list) and gt):
+            continue
+        n_with_gt += 1
+        text = str(r.get("final_text") or "")
+        if text.startswith("[non-answer:"):
+            continue
+        gold, named = {str(g) for g in gt}, set(_GT_ITEM_RE.findall(text))
+        hit = len(gold & named)
+        scored.append((r.get("generated_on_join") is True, hit / len(gold), hit / len(named) if named else 0.0))
+    if not n_with_gt:
+        return None
+
+    def mean(xs: list[float]) -> float | None:
+        return round(sum(xs) / len(xs), 4) if xs else None
+
+    def part(sel: list[tuple[bool, float, float]]) -> dict[str, Any]:
+        return {"answered": len(sel), "recall": mean([s[1] for s in sel]), "precision": mean([s[2] for s in sel])}
+
+    return {"with_ground_truth": n_with_gt, **part(scored),
+            "on_join": part([s for s in scored if s[0]]), "not_on_join": part([s for s in scored if not s[0]])}
 
 
 def score_mvv(rows_by_label: Mapping[str, list[dict[str, Any]]], cust_to_company: Mapping[str, str],
@@ -1762,8 +1806,9 @@ def mvv_rungs(score: dict[str, Any]) -> list[dict[str, Any]]:
         kread = "interpretable" if key["interpretable"] else "not interpretable: " + "; ".join(key["reasons"])
         rungs.append(Rung(
             "MVV", "key_heldout_branch_entered", key["entered"] / key["n_valid"] if key["n_valid"] else None,
-            f"report ({key['entered']} entered, {key['both_conjuncts']} with both conjuncts, of {key['n_valid']} "
-            f"valid of {key['asked']} asked; ground-truth recall {key['ground_truth_recall']}; {kread})",
+            f"report ({key['entered']} entered, {key['both_conjuncts']} with both conjuncts "
+            f"({key['unsupported_facet']} unsupported, {key['evidence_keys']} keyed), of {key['n_valid']} valid of "
+            f"{key['asked']} asked; ground truth {key['ground_truth']}; {kread})",
             "BASELINE"))
     for lb in RUN_LABELS:
         if lb not in runs:
