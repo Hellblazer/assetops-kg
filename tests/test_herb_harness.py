@@ -1187,11 +1187,13 @@ def test_mvv_reports_issue5_f1_beside_the_script_value_and_agg2_unasserted():
     assert out["runs"]["a"]["run_label"] == "a"
 
 
-def _held(n=6, *, entered=(0, 1, 4), invalid=(4,), skipped=()):
+def _held(n=6, *, entered=(0, 1, 4), invalid=(4,), skipped=(), both=()):
     rows = []
     for i in range(n):
         row = {"question": f"h{i}", "run_label": "heldout", "valid": i not in invalid and i not in skipped,
                "resolution_entered": i in entered, "resolution_reason": ""}
+        if i in both:  # the gate's two conjuncts held: a repair ran and the anchors named a key
+            row.update(repair_outcome="no_new_evidence", anchor_key_ids=["CUST-0001"])
         if i in skipped:
             row["skipped"] = "cost cap reached"
         rows.append(row)
@@ -1221,8 +1223,57 @@ def test_a_heldout_zero_is_not_interpretable_when_the_branch_entered_no_issue_qu
 
 def test_a_heldout_zero_stays_interpretable_when_one_run_entered_the_branch():
     a = _issue_rows(label="a", entered=False)
-    h = _mvv(a, _issue_rows(label="b"), _held(6, entered=()))["heldout"]
-    assert h["interpretable"] is True
+    h = _mvv(a, _issue_rows(label="b"), _held(6, entered=(), both=(2,)))["heldout"]
+    assert h["interpretable"] is True and h["both_conjuncts"] == 1
+
+
+def test_a_heldout_zero_with_no_row_holding_both_conjuncts_cannot_fail_so_it_is_not_interpretable():
+    """nexus-bwct4.4: the final MVV's 0 of 20 had no row with a repair AND anchor keys, so no row could enter."""
+    h = _mvv(_issue_rows(label="a"), _issue_rows(label="b"), _held(6, entered=()))["heldout"]
+    assert (h["entered"], h["both_conjuncts"], h["interpretable"]) == (0, 0, False)
+    assert any("both conjuncts" in r for r in h["reasons"])
+
+
+def test_a_row_with_a_repair_but_no_anchor_key_does_not_count_as_both_conjuncts():
+    rows = _held(3, entered=(), invalid=())
+    rows[0]["repair_outcome"] = "no_new_evidence"  # unsupported facet, but anchors named no key
+    h = _mvv(_issue_rows(label="a"), _issue_rows(label="b"), rows)["heldout"]
+    assert h["both_conjuncts"] == 0 and h["interpretable"] is False
+
+
+def test_an_entered_heldout_count_needs_no_both_conjuncts_floor():
+    h = _mvv(_issue_rows(label="a"), _issue_rows(label="b"), _held(6, entered=(0,), invalid=()))["heldout"]
+    assert h["entered"] == 1 and h["interpretable"] is True
+
+
+def test_ground_truth_recall_is_the_mean_share_of_ground_truth_an_answered_row_names():
+    rows = _held(3, entered=(), invalid=(), both=(0,))
+    rows[0].update(ground_truth=["eid_1", "eid_2"], final_text="eid_1 resolved it")
+    rows[1].update(ground_truth=["eid_3"], final_text="[non-answer: uncovered] nothing")
+    rows[2].update(ground_truth=["eid_4"], final_text="eid_4")
+    h = herb_ladder.heldout_report(rows, {"a": {"issue_entered": 1}})
+    assert h["ground_truth_recall"] == 0.75, "answered rows only: (0.5 + 1.0) / 2"
+
+
+def test_the_key_heldout_arm_selects_single_hop_questions_whose_citations_name_a_key():
+    product = {
+        "slack": [{"id": "m1", "text": "CUST-0042 hit a bug"}, {"id": "m2", "text": "no key here"}],
+        "answerable_questions": [
+            {"question": "q0", "type": "person", "ground_truth": ["eid_1"], "citations": ["m1"]},
+            {"question": "q1", "type": "person", "ground_truth": ["eid_2"], "citations": ["m2"]},
+            {"question": "q2", "type": "company", "ground_truth": ["X"], "citations": ["m1"]},
+            {"question": "q3", "type": "pr", "ground_truth": ["u"], "citations": ["m1"]},
+        ],
+    }
+    qs = herb_ladder.key_heldout_questions(product, exclude={3})
+    assert [(q["herb_index"], q["cited_keys"]) for q in qs] == [(0, 1)]
+
+
+def test_the_frozen_key_heldout_fixture_loads_and_excludes_the_frozen_heldout_set():
+    key = herb_ladder.load_heldout(herb_ladder._GOLD_KEY_HELDOUT)
+    plain = {q["herb_index"] for q in herb_ladder.load_heldout()}
+    assert key and not ({q["herb_index"] for q in key} & plain)
+    assert all(q["type"] != "company" and q["cited_keys"] >= 1 for q in key)
 
 
 def test_a_heldout_set_with_no_valid_run_is_not_interpretable():
@@ -2517,7 +2568,7 @@ def _emit_world(monkeypatch, tmp_path, *, cost=0.05, fail_on=(), report=ANCHOR_R
     monkeypatch.setattr(herb_ladder, "_load_gold", lambda: {
         "members": {}, "cust_to_company": REGISTRY, "mentions": {}, "q_to_custs": {}})
     monkeypatch.setattr(herb_ladder, "_load_product", lambda: {"answerable_questions": questions})
-    monkeypatch.setattr(herb_ladder, "load_heldout", lambda: held)
+    monkeypatch.setattr(herb_ladder, "load_heldout", lambda path=None: held if path is None else [])
     monkeypatch.setattr(herb_ladder, "service_versions", lambda: dict(_VERSIONS))
     monkeypatch.setenv("HERB_NEXUS_REV", REV)
     monkeypatch.setattr(herb_ladder, "nx_answer_call", ans)

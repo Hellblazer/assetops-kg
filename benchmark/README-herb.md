@@ -166,7 +166,16 @@ Rules, as the code applies them (`join_completeness`, `precision_gate`, `score_m
    Each question runs once behind the same sweep. The count is reported as entered of valid of asked, with the
    skipped and invalid counts and why the others did not enter (`not_entered_reasons`), and is marked **not
    interpretable** when no held-out run was valid or when the branch entered no issue question in either
-   run (a mis-set switch or pattern would read the same as a correct zero).
+   run (a mis-set switch or pattern would read the same as a correct zero), or when fewer than
+   `HELDOUT_MIN_BOTH_CONJUNCTS` (1) valid rows had both conjuncts of the branch's gate, a repair (an
+   unsupported facet) AND entity keys in the anchors (`both_conjuncts`): with none, no row could have entered,
+   so a zero cannot fail (nexus-bwct4.4; the final 2026-11-06 MVV's 0 of 20 had none).
+   **Key-bearing held-out arm.** `fixtures/herb/single_hop_key_heldout.json` (frozen the same way;
+   `--freeze-key-heldout`) holds the single-hop questions outside that set whose cited artifacts name a
+   `CUST-\d{4}` key: 8 SearchFlow questions (herb_index 29, 31, 33, 35, 37, 38, 39, 42), so the gate's key
+   conjunct can hold. It runs after the held-out set under the same cap and is reported as its own count
+   (`key_heldout`: entered, `both_conjuncts`, and `ground_truth_recall`, the mean share of each answered row's
+   ground-truth items its text names), so an answer generated on a join is checked against HERB's truth.
 10. **Exact assertions only for deterministic rungs** (P2, P3, the script, both oracles: `PREDICTIONS`).
     nx_answer and aggregation rows are recorded with their run label and never asserted exactly
     (`NX_ANSWER_PREDICTIONS`, `asserted_exactly: false` in the comparison).
