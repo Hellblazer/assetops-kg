@@ -122,6 +122,22 @@ _in_sandbox() {
   env -i "${e[@]}" "$@"
 }
 
+# The HERB corpus names customers as CUST-<4 digits>. The exact-key resolution branch and the
+# RDR-250 pool key scan find keys only in collections the config maps to a pattern, and
+# `nx init` writes no `entity:` block, so without this a sandbox measures the branch as
+# never entered (the 2026-11-18 RDR-250 turn-on window lost its first attempt to it).
+# Written once, only when the config has no `entity:` block; HERB_ENTITY_PATTERN overrides.
+_ensure_entity_pattern() {
+  local cfg="$SB_CFG/config.yml" pat="${HERB_ENTITY_PATTERN:-CUST-\\d{4\}}"
+  [ -f "$cfg" ] || _die "no $cfg after nx init"
+  if grep -q '^entity:' "$cfg"; then
+    echo "[herb_sandbox] config already has an entity: block; left as is" >&2
+    return 0
+  fi
+  printf 'entity:\n  collections:\n    knowledge__herb-*: %s\n' "$pat" >> "$cfg"
+  echo "[herb_sandbox] entity.collections knowledge__herb-* -> $pat" >&2
+}
+
 # `nx daemon service status` prints "host: <h>" and "port: <p>" lines (pg_port is a different key).
 _service_url() {
   _in_sandbox "$NX_BIN" daemon service status 2>&1 \
@@ -150,6 +166,7 @@ cmd_up() {
   done
   echo "[herb_sandbox] nx init (local mode, virgin HOME $SB_HOME)" >&2
   _in_sandbox "$NX_BIN" init -y --no-autostart
+  _ensure_entity_pattern
   local url
   url="$(_service_url)"
   if [ -z "$url" ] || ! _assert_loopback "$url"; then
