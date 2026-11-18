@@ -128,7 +128,10 @@ _in_sandbox() {
 # never entered (the 2026-11-18 RDR-250 turn-on window lost its first attempt to it).
 # Written once, only when the config has no `entity:` block; HERB_ENTITY_PATTERN overrides.
 _ensure_entity_pattern() {
-  local cfg="$SB_CFG/config.yml" pat="${HERB_ENTITY_PATTERN:-CUST-\\d{4\}}"
+  # The default is a single-quoted literal: inside "${VAR:-word}" bash 3.2 (macOS /bin/bash) keeps the
+  # backslash in "\}" and wrote CUST-\d{4\}, a regex nexus accepts and that matches nothing.
+  local cfg="$SB_CFG/config.yml" pat="${HERB_ENTITY_PATTERN:-}"
+  [ -n "$pat" ] || pat='CUST-\d{4}'
   [ -f "$cfg" ] || _die "no $cfg after nx init"
   if grep -q '^entity:' "$cfg"; then
     echo "[herb_sandbox] config already has an entity: block; left as is" >&2
