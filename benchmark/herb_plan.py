@@ -224,6 +224,83 @@ def summarize_readout(questions: list[dict[str, Any]], plan_f1: dict[str, float]
     return out
 
 
+# --------------------------------------------------------------------------- paired statistics
+
+BOOTSTRAP_RESAMPLES = 10_000
+BOOTSTRAP_SEED = 20261119
+
+
+def win_tie_loss(diffs: list[float]) -> tuple[int, int, int]:
+    return (sum(d > 0 for d in diffs), sum(d == 0 for d in diffs), sum(d < 0 for d in diffs))
+
+
+def sign_test(wins: int, losses: int) -> float:
+    """Exact two-sided sign test over the untied pairs (p = 1.0 with none)."""
+    from math import comb
+
+    n = wins + losses
+    if n == 0:
+        return 1.0
+    k = min(wins, losses)
+    return min(1.0, 2 * sum(comb(n, i) for i in range(k + 1)) / 2 ** n)
+
+
+def paired_bootstrap(diffs: list[float], *, n_resamples: int = BOOTSTRAP_RESAMPLES,
+                     seed: int = BOOTSTRAP_SEED) -> tuple[float, float, float]:
+    """Mean paired difference with a percentile 95% CI over ``n_resamples`` resamples of the pairs."""
+    import random
+
+    if not diffs:
+        return (0.0, 0.0, 0.0)
+    rng = random.Random(seed)
+    n = len(diffs)
+    means = sorted(sum(diffs[rng.randrange(n)] for _ in range(n)) / n for _ in range(n_resamples))
+    return (sum(diffs) / n, means[int(0.025 * n_resamples)], means[int(0.975 * n_resamples) - 1])
+
+
+def required_pairs(*, mean: float, sd: float) -> int | None:
+    """Pairs for 80% power at two-sided alpha 0.05 (normal approximation); None when the effect is zero."""
+    from math import ceil
+
+    if mean == 0:
+        return None
+    return ceil(((1.959964 + 0.841621) * sd / abs(mean)) ** 2)
+
+
+def seeded_subset(items: list[Any], n: int, *, seed: int) -> list[Any]:
+    """A reproducible random subset of n items, kept in the input order (all of them when n >= len)."""
+    import random
+
+    if n >= len(items):
+        return list(items)
+    keep = set(random.Random(seed).sample(range(len(items)), n))
+    return [x for i, x in enumerate(items) if i in keep]
+
+
+def _paired_block(diffs: list[float], n_resamples: int, seed: int) -> dict[str, Any]:
+    mean, lo, hi = paired_bootstrap(diffs, n_resamples=n_resamples, seed=seed)
+    w, t, l = win_tie_loss(diffs)
+    verdict = "plan better" if lo > 0 else "stock better" if hi < 0 else "inconclusive"
+    return {"n": len(diffs), "mean_diff": mean, "ci95": [lo, hi], "wtl": [w, t, l],
+            "sign_p": sign_test(w, l), "verdict": verdict}
+
+
+def paired_report(questions: list[dict[str, Any]], plan_f1: dict[str, float], stock_f1: dict[str, float], *,
+                  n_resamples: int = BOOTSTRAP_RESAMPLES, seed: int = BOOTSTRAP_SEED) -> dict[str, Any]:
+    """Per-question plan-minus-stock F1 on ``questions``: overall and per shape. A CI that crosses 0 is called
+    inconclusive, whatever the mean."""
+    def d(q: dict[str, Any]) -> float:
+        k = f"{q['product']}#{q['index']}"
+        return plan_f1.get(k, 0.0) - stock_f1.get(k, 0.0)
+
+    out: dict[str, Any] = {"overall": _paired_block([d(q) for q in questions], n_resamples, seed), "shapes": {}}
+    for shape in ("affected", "max-count", "prev-release"):
+        sq = [q for q in questions if shape_of(q["question"]) == shape]
+        if sq:
+            out["shapes"][shape] = _paired_block([d(q) for q in sq], n_resamples, seed)
+    return out
+
+
 # --------------------------------------------------------------------------- driver
 
 
@@ -413,6 +490,17 @@ def cmd_plan_answer(args: Any) -> int:
     if len(qs) != expect:
         hp.console.print(f"[red]split {args.split}: expected {expect} questions, found {len(qs)}[/red]")
         return 2
+    subset_f = out / "subset.json"
+    if args.subset_n is not None:
+        routed = [q for q in qs if route_question(q["question"])]
+        keep = seeded_subset([f"{q['product']}#{q['index']}" for q in routed], args.subset_n, seed=args.subset_seed)
+        if subset_f.exists() and json.loads(subset_f.read_text())["keys"] != keep:
+            hp.console.print(f"[red]{subset_f} differs from the subset these arguments give[/red]")
+            return 2
+        out.mkdir(parents=True, exist_ok=True)
+        subset_f.write_text(json.dumps({"seed": args.subset_seed, "n": args.subset_n, "routed_total": len(routed),
+                                        "keys": keep}))
+        qs = [q for q in qs if not route_question(q["question"]) or f"{q['product']}#{q['index']}" in set(keep)]
     cfg_dir = Path(os.environ["NEXUS_CONFIG_DIR"])
     pattern = ""
     cfgtxt = (cfg_dir / "config.yml").read_text() if (cfg_dir / "config.yml").exists() else ""
@@ -461,12 +549,30 @@ def cmd_plan_score(args: Any) -> int:
             f.write(json.dumps({"key": k, "names": v}) + "\n")
     plan_f1 = {r["key"]: r["f1"] for r in res["per_question"]}
     stock_f1 = {r["key"]: r["f1"] for r in json.loads((Path(args.stock_dir) / "score-openai.json").read_text())["per_question"]}
+    subset_f = out / "subset.json"
+    subset = set(json.loads(subset_f.read_text())["keys"]) if subset_f.exists() else None
+    # Questions the rule leaves on the stock path (and routed ones outside a declared subset) were not rerun:
+    # their rows are the stock run's.
+    rerun = [q for q in qs if route_question(q["question"]) and (q["product"], q["index"]) in rows
+             and (subset is None or f"{q['product']}#{q['index']}" in subset)]
+    rerun_keys = {f"{q['product']}#{q['index']}" for q in rerun}
+    for q in qs:
+        k = f"{q['product']}#{q['index']}"
+        if k not in rerun_keys:
+            plan_f1[k] = stock_f1.get(k, 0.0)
     summary = summarize_readout(qs, plan_f1, stock_f1, rows)
+    summary["merged_note"] = ("non-routed questions carry the stock run's row (identical code, not rerun)"
+                              if not args.only_answered else "routed-only DEV run")
+    summary["rerun"] = {"n": len(rerun), "routed_in_split": sum(1 for q in qs if route_question(q["question"])),
+                        "subset": None if subset is None else len(subset)}
+    summary["paired_on_rerun"] = paired_report(rerun, plan_f1, stock_f1)
     summary["status_counts"] = res["status_counts"]
     summary["spend_usd"] = hp.Ledger(out / "ledger.jsonl").total()
     summary["pin_misses"] = sum(1 for r in rows.values() if r.get("route") and not r.get("pinned_plan_ran"))
-    summary["per_question"] = [{**r, "stock_f1": stock_f1.get(r["key"]), "shape": shape_of(next(
-        q["question"] for q in qs if f"{q['product']}#{q['index']}" == r["key"]))} for r in res["per_question"]]
+    summary["per_question"] = [{**r, "plan_f1_used": plan_f1.get(r["key"]), "stock_f1": stock_f1.get(r["key"]),
+                                "shape": shape_of(next(q["question"] for q in qs
+                                                       if f"{q['product']}#{q['index']}" == r["key"]))}
+                               for r in res["per_question"]]
     (out / "score-plan.json").write_text(json.dumps(summary, indent=1))
     hp.console.print({k: v for k, v in summary.items() if k != "per_question"})
     return 0
@@ -482,6 +588,8 @@ def add_subcommands(sub: Any) -> None:
     pa.add_argument("--limit", type=int, default=None)
     pa.add_argument("--plan-dir", default=None, help="dir holding plan-id.txt (default: --out-dir)")
     pa.add_argument("--label", default="")
+    pa.add_argument("--subset-n", type=int, default=None, help="run a seeded random subset of the routed questions")
+    pa.add_argument("--subset-seed", type=int, default=BOOTSTRAP_SEED)
     pa.add_argument("--no-coverage", action="store_true",
                     help="NX_ANSWER_COVERAGE=0 for the pinned-plan calls only (the stock path keeps it on)")
     pa.set_defaults(fn=cmd_plan_answer)

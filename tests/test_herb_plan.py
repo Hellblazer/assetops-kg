@@ -339,3 +339,61 @@ def test_summarize_readout_per_shape_and_declines():
     assert out["shapes"]["max-count"] == {"n": 1, "plan": 100.0, "stock": 0.0, "plan_declines": 0}
     assert out["shapes"]["prev-release"]["plan_declines"] == 1
     assert out["shapes"]["affected"]["n"] == 1
+
+
+# --------------------------------------------------------------------------- paired statistics
+
+
+def test_win_tie_loss():
+    assert hpl.win_tie_loss([0.5, 0.0, -0.2, 0.0, 1.0]) == (2, 2, 1)
+
+
+def test_sign_test_exact_two_sided():
+    assert hpl.sign_test(0, 0) == 1.0
+    assert hpl.sign_test(5, 0) == pytest.approx(2 * 0.5 ** 5)
+    assert hpl.sign_test(3, 3) == pytest.approx(1.0)
+    assert hpl.sign_test(8, 2) == pytest.approx(0.109375)
+
+
+def test_paired_bootstrap_is_seeded_and_brackets_the_mean():
+    d = [0.5, 0.25, -0.25, 1.0, 0.0, 0.5, 0.75, 0.0]
+    a = hpl.paired_bootstrap(d, n_resamples=2000, seed=7)
+    b = hpl.paired_bootstrap(d, n_resamples=2000, seed=7)
+    assert a == b
+    mean, lo, hi = a
+    assert mean == pytest.approx(sum(d) / len(d))
+    assert lo <= mean <= hi
+
+
+def test_paired_bootstrap_ci_excludes_zero_for_a_clear_effect():
+    mean, lo, hi = hpl.paired_bootstrap([1.0] * 12 + [0.5] * 4, n_resamples=2000, seed=1)
+    assert lo > 0
+    mean, lo, hi = hpl.paired_bootstrap([1.0, -1.0] * 8, n_resamples=2000, seed=1)
+    assert lo < 0 < hi
+
+
+def test_required_pairs_for_80_percent_power():
+    # n = ((z_a/2 + z_b) * sd / mean)^2, z = 1.96 and 0.8416
+    n = hpl.required_pairs(mean=0.2, sd=0.5)
+    assert n == 50
+    assert hpl.required_pairs(mean=0.0, sd=0.5) is None
+
+
+def test_seeded_subset_is_reproducible_and_sorted():
+    items = list(range(40))
+    a = hpl.seeded_subset(items, 10, seed=20261119)
+    assert a == hpl.seeded_subset(items, 10, seed=20261119)
+    assert len(a) == 10 and a == sorted(a)
+    assert hpl.seeded_subset(items, 99, seed=1) == items
+
+
+def test_paired_report_per_shape_marks_ci_crossing_zero_inconclusive():
+    qs = [{"product": "P", "index": i, "question": AGG} for i in range(6)] + \
+         [{"product": "Q", "index": i, "question": PREV} for i in range(4)]
+    plan = {f"P#{i}": 1.0 for i in range(6)} | {"Q#0": 1.0, "Q#1": 0.0, "Q#2": 1.0, "Q#3": 0.0}
+    stock = {f"P#{i}": 0.0 for i in range(6)} | {"Q#0": 0.0, "Q#1": 1.0, "Q#2": 0.0, "Q#3": 1.0}
+    rep = hpl.paired_report(qs, plan, stock, n_resamples=2000, seed=3)
+    assert rep["overall"]["n"] == 10
+    assert rep["shapes"]["max-count"]["verdict"] == "plan better"
+    assert rep["shapes"]["prev-release"]["verdict"] == "inconclusive"
+    assert rep["shapes"]["max-count"]["wtl"] == [6, 0, 0]
