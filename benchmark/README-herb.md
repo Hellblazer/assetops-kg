@@ -221,3 +221,29 @@ rows, plus a HERB-shaped `.pk` for `~/git/HERB/code/evaluate.py`.
   absolute scores as opaque for cross-system comparison.
 - HERB ships two `urls` records under one id (the NLTK repo); the second is stored as
   `<id>#dup2` so catalog identity (collection, title) keeps both.
+
+## Full-pool company run (`benchmark/run_herb_pool.py`)
+
+Design of record: T2 `nexus_rdr/herb-full-pool-company-prereg`. One pooled collection
+(`knowledge__herb-pool`) of all 30 products, the 130 `type == "company"` questions, one `nx_answer` attempt
+each, scored with HERB's `answer_to_companies` + `f1_score_sets` (copied verbatim, attribution in the module).
+`index` is free; `answer` and `score` spend. The three subcommands never read `answerable_questions`,
+`unanswerable_questions` or `ground_truth` on the corpus path.
+
+```bash
+export HERB_SANDBOX_DIR=<scratch>/herb-pool/sandbox/.herb-sandbox NX_PYTHON=<venv>/bin/python NX_BIN=<venv>/bin/nx
+SB=./benchmark/herb_sandbox.sh
+$SB up                                                    # writes the entity pattern (CUST-\d{4}) into config.yml
+$SB run python3 -m benchmark.run_herb_pool --out-dir <out> index     # free, resumable (index-state.json)
+HERB_NEXUS_REV=<sha> HERB_SANDBOX_LLM=1 python3 <nexus>/tests/e2e/lib/claude_credentials.py run -- \
+    $SB run python3 -m benchmark.run_herb_pool --out-dir <out> answer [--limit N] [--start K]   # PAID, cap 40 USD
+OPENAI_API_KEY=... python3 -m benchmark.run_herb_pool --out-dir <out> score --extractor openai   # protocol-exact
+python3 -m benchmark.run_herb_pool --out-dir <out> score --extractor sonnet   # "Sonnet-extracted, not protocol-exact"
+```
+
+`index` refuses to run if the config has no entity pattern or if an LLM token is in the environment.
+`answer` refuses without HERB_NEXUS_REV, the token, a probe hit in the pool, or when an aspect worker for the
+sandbox is running (indexing queues one aspect-extraction task per note; the answer child also sets
+`NX_ASPECT_WORKER_AUTOSTART=0`). It stops before a question when charged + 0.30 > cap - 1 (ledger.jsonl; an
+unknown cost is charged 0.30); an error row is a done row (one attempt each). `score` caches extractions in
+`extractions-<extractor>.jsonl` and writes `score-<extractor>.json`.
