@@ -26,6 +26,14 @@
 # Without HERB_SANDBOX_LLM=1 the token is dropped, so indexing (whose post-store hooks
 # can queue aspect extraction, an LLM call) can never spend.
 #
+# Arm B (Voyage embedder), explicit opt-in only. HERB_SANDBOX_VOYAGE=1 with NX_VOYAGE_API_KEY in the
+# caller's environment hands that key to the sandbox's children (as NX_VOYAGE_API_KEY and VOYAGE_API_KEY:
+# the engine reads the first at spawn, the client's write path wants the second) and, on `up`, seeds
+# local.embed_model = voyage-context-3 BEFORE `nx init` so the engine boots with the Voyage profile (init
+# keeps a voyage-* value). The key never enters the env(1) argument list: it travels in a 0600 file in a
+# 0700 temp dir that a launcher reads inside the sandbox, and an EXIT trap deletes it. Without the opt-in
+# nothing changes: the key is dropped and the engine stays on the local bge-768 (arm A).
+#
 # Usage:
 #   ./benchmark/herb_sandbox.sh up                    # provision (idempotent) and start
 #   ./benchmark/herb_sandbox.sh run <command...>      # run a command inside the sandbox env
@@ -51,6 +59,21 @@ SB_CFG="$SB_HOME/.config/nexus"
 REAL_HOME="$HOME"
 
 _die() { echo "[herb_sandbox] $*" >&2; exit 1; }
+
+# Voyage opt-in (arm B). VOYAGE_KEY_FILE is set only after _voyage_prepare ran.
+VOYAGE_KEY_FILE=""
+VOYAGE_DIR=""
+_voyage_cleanup() { if [ -n "$VOYAGE_DIR" ]; then rm -rf "$VOYAGE_DIR"; fi; }
+_voyage_prepare() {
+  [ "${HERB_SANDBOX_VOYAGE:-0}" = 1 ] || return 0
+  [ -n "${NX_VOYAGE_API_KEY:-}" ] || _die "HERB_SANDBOX_VOYAGE=1 needs NX_VOYAGE_API_KEY in the environment"
+  VOYAGE_DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/herb-voyage.XXXXXX")"
+  trap _voyage_cleanup EXIT
+  VOYAGE_KEY_FILE="$VOYAGE_DIR/key"
+  # printf is a builtin: the key is never in any argv.
+  (umask 077; printf '%s' "$NX_VOYAGE_API_KEY" > "$VOYAGE_KEY_FILE")
+  chmod 600 "$VOYAGE_KEY_FILE"
+}
 
 # The sandbox must not be (or contain) the operator's real home or config.
 _assert_sandbox_path() {
@@ -109,6 +132,8 @@ _sandbox_env() {
   if [ -n "${NX_ANSWER_COVERAGE:-}" ]; then e+=("NX_ANSWER_COVERAGE=$NX_ANSWER_COVERAGE"); fi
   if [ -n "${HTTPS_PROXY:-}" ]; then e+=("HTTPS_PROXY=$HTTPS_PROXY"); fi
   if [ -n "${HTTP_PROXY:-}" ]; then e+=("HTTP_PROXY=$HTTP_PROXY"); fi
+  # Voyage opt-in: only the path of the 0600 key file and the flag, never the key itself.
+  if [ -n "$VOYAGE_KEY_FILE" ]; then e+=("HERB_SANDBOX_VOYAGE=1" "HERB_VOYAGE_KEY_FILE=$VOYAGE_KEY_FILE"); fi
   if [ "${HERB_SANDBOX_LLM:-0}" = 1 ] && [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
     e+=("CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_CODE_OAUTH_TOKEN")
   fi
@@ -119,7 +144,15 @@ _in_sandbox() {
   local -a e=()
   local x
   while IFS= read -r -d '' x; do e+=("$x"); done < <(_sandbox_env)
-  env -i "${e[@]}" "$@"
+  if [ -n "$VOYAGE_KEY_FILE" ]; then
+    # The launcher reads the key inside the sandbox env, so it is an environment value of the child and
+    # not an argument of env(1).
+    env -i "${e[@]}" /bin/bash -c \
+      'k="$(cat "$HERB_VOYAGE_KEY_FILE")"; export NX_VOYAGE_API_KEY="$k" VOYAGE_API_KEY="$k"; unset k; exec "$@"' \
+      herb-voyage "$@"
+  else
+    env -i "${e[@]}" "$@"
+  fi
 }
 
 # The HERB corpus names customers as CUST-<4 digits>. The exact-key resolution branch and the
@@ -167,8 +200,18 @@ cmd_up() {
         || cp -R "$REAL_HOME/.cache/nexus/$d" "$SB_HOME/.cache/nexus/$d"
     fi
   done
+  if [ -n "$VOYAGE_KEY_FILE" ] && [ ! -f "$SB_CFG/config.yml" ]; then
+    # nx init keeps an existing voyage-* local.embed_model instead of stamping bge-768; the engine then
+    # boots with the Voyage profile because the key reaches it at spawn.
+    printf 'local:\n  embed_model: voyage-context-3\n' > "$SB_CFG/config.yml"
+    echo "[herb_sandbox] Voyage opt-in: local.embed_model = voyage-context-3 seeded before init" >&2
+  fi
   echo "[herb_sandbox] nx init (local mode, virgin HOME $SB_HOME)" >&2
   _in_sandbox "$NX_BIN" init -y --no-autostart
+  if [ -n "$VOYAGE_KEY_FILE" ]; then
+    grep -Eq '^[[:space:]]+embed_model:[[:space:]]*"?voyage' "$SB_CFG/config.yml" \
+      || { cmd_down || true; _die "Voyage opt-in, but local.embed_model is not a voyage model after init"; }
+  fi
   _ensure_entity_pattern
   local url
   url="$(_service_url)"
@@ -248,17 +291,26 @@ cmd_self_test() {
   if _assert_loopback "https://api.conexus-nexus.com"; then echo "FAIL: managed URL passed loopback"; fail=1; fi
   if (SB="$REAL_HOME"; _assert_sandbox_path) 2>/dev/null; then echo "FAIL: real HOME accepted as sandbox"; fail=1; fi
   if (SB="$REAL_HOME/.config/nexus"; _assert_sandbox_path) 2>/dev/null; then echo "FAIL: live config accepted as sandbox"; fail=1; fi
+  # Voyage: the key never appears in the allowlist (env(1)'s argv), with or without the opt-in.
+  export NX_VOYAGE_API_KEY=pa-selftest-secret
+  local envf="${TMPDIR:-/tmp}/herb-selftest-env.$$"
+  out="$( (unset HERB_SANDBOX_VOYAGE; _sandbox_env | tr '\0' '\n') )"
+  if grep -q "VOYAGE" <<<"$out"; then echo "FAIL: voyage var in the allowlist without opt-in"; fail=1; fi
+  (HERB_SANDBOX_VOYAGE=1; _voyage_prepare; _sandbox_env | tr '\0' '\n' > "$envf")
+  if grep -q "selftest-secret" "$envf"; then echo "FAIL: voyage key in the allowlist"; fail=1; fi
+  grep -q "^HERB_VOYAGE_KEY_FILE=" "$envf" || { echo "FAIL: key file path not passed with opt-in"; fail=1; }
+  rm -f "$envf"
   if [ "$fail" = 0 ]; then echo "herb_sandbox self-test: OK"; fi
   exit "$fail"
 }
 
 case "${1:-}" in
-  up) cmd_up ;;
+  up) _voyage_prepare; cmd_up ;;
   down) cmd_down ;;
   status) cmd_status ;;
   destroy) cmd_destroy ;;
   --self-test) cmd_self_test ;;
-  run) shift; _assert_sandbox_path; _in_sandbox "$@" ;;
+  run) shift; _assert_sandbox_path; _voyage_prepare; _in_sandbox "$@" ;;
   "") _die "usage: herb_sandbox.sh {up|down|status|destroy|run <cmd...>|<cmd...>}" ;;
-  *) _assert_sandbox_path; _in_sandbox "$@" ;;
+  *) _assert_sandbox_path; _voyage_prepare; _in_sandbox "$@" ;;
 esac

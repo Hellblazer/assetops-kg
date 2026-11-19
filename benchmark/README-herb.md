@@ -247,3 +247,15 @@ sandbox is running (indexing queues one aspect-extraction task per note; the ans
 `NX_ASPECT_WORKER_AUTOSTART=0`). It stops before a question when charged + 0.30 > cap - 1 (ledger.jsonl; an
 unknown cost is charged 0.30); an error row is a done row (one attempt each). `score` caches extractions in
 `extractions-<extractor>.jsonl` and writes `score-<extractor>.json`.
+
+### Arm B: Voyage embedder (explicit opt-in)
+
+The sandbox strips every Voyage key, so arm A stays on the local bge-768. `HERB_SANDBOX_VOYAGE=1` is the only
+way a key reaches the service: put the key in `NX_VOYAGE_API_KEY` of the calling shell (never on a command
+line), run `up` and `index` with the flag set, then `answer` and `score` without it (reads need no key; the
+engine keeps the key it was spawned with). `up` seeds `local.embed_model = voyage-context-3` before `nx init`
+so the collection mints as `knowledge__herb-pool__voyage-context-3__v1`; check `nx collection list` before
+indexing. The key travels in a 0600 temp file read by a launcher inside the sandbox env, never in env(1)'s
+argv, and an EXIT trap deletes it. Voyage collections and the bge ones do not coexist in one sandbox: use a
+fresh `HERB_SANDBOX_DIR` per arm.
+

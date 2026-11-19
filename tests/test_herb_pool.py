@@ -325,6 +325,24 @@ def test_sandbox_guard(monkeypatch, tmp_path):
         hp.sandbox_guard(allow_llm_token=False)
 
 
+def test_sandbox_guard_voyage_key_only_with_opt_in(monkeypatch, tmp_path):
+    for k in ("HERB_SANDBOX", "NEXUS_CONFIG_DIR", "NX_SERVICE_URL", "CLAUDE_CODE_OAUTH_TOKEN",
+              "VOYAGE_API_KEY", "NX_VOYAGE_API_KEY", "HERB_SANDBOX_VOYAGE"):
+        monkeypatch.delenv(k, raising=False)
+    cfg = tmp_path / ".herb-sandbox" / "home" / ".config" / "nexus"
+    monkeypatch.setenv("HERB_SANDBOX", "1")
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
+    monkeypatch.setenv("VOYAGE_API_KEY", "k")
+    with pytest.raises(SystemExit, match="VOYAGE_API_KEY is set"):
+        hp.sandbox_guard(allow_llm_token=False)
+    monkeypatch.setenv("HERB_SANDBOX_VOYAGE", "1")
+    assert hp.sandbox_guard(allow_llm_token=False) == cfg
+    # the opt-in does not excuse the other ambient keys
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "a")
+    with pytest.raises(SystemExit, match="ANTHROPIC_API_KEY is set"):
+        hp.sandbox_guard(allow_llm_token=False)
+
+
 def test_entity_pattern_check(tmp_path):
     assert not hp.entity_pattern_configured(tmp_path)
     (tmp_path / "config.yml").write_text("install:\n  mode: local\n")

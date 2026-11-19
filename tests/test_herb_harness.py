@@ -2878,3 +2878,50 @@ def test_main_refuses_a_resume_date_that_is_not_a_date_before_it_calls_emit_mvv(
 def test_the_sandbox_wrapper_passes_the_resolution_switch_through_its_allowlist():
     text = (REPO / "benchmark" / "herb_sandbox.sh").read_text()
     assert 'e+=("NX_ANSWER_RESOLUTION_REPAIR=$NX_ANSWER_RESOLUTION_REPAIR")' in text
+
+
+# --------------------------------------------------------------------------- Voyage opt-in (arm B)
+
+_FAKE_KEY = "pa-FAKEKEYFORTESTSONLY0123456789"
+_PROBE = ("import os,stat;f=os.environ.get('HERB_VOYAGE_KEY_FILE','');"
+          "m=oct(stat.S_IMODE(os.stat(f).st_mode)) if f else '-';"
+          "print('|'.join([('set' if os.environ.get('NX_VOYAGE_API_KEY')==%r else ''),"
+          "('set' if os.environ.get('VOYAGE_API_KEY')==%r else ''),m]))") % (_FAKE_KEY, _FAKE_KEY)
+
+
+def _sandbox_run(tmp_path, env_extra, *cmd):
+    env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path), "TMPDIR": str(tmp_path / "tmp"),
+           "HERB_SANDBOX_DIR": str(tmp_path / ".herb-sandbox"), **env_extra}
+    (tmp_path / "tmp").mkdir(exist_ok=True)
+    return subprocess.run(["bash", str(REPO / "benchmark" / "herb_sandbox.sh"), "run", *cmd],
+                          capture_output=True, text=True, timeout=60, env=env)
+
+
+def test_voyage_key_reaches_child_only_with_explicit_opt_in(tmp_path):
+    """Arm A's default stays keyless; HERB_SANDBOX_VOYAGE=1 hands the key to the child through a
+    0600 temp file (never argv), and the file is gone when the run ends."""
+    r = _sandbox_run(tmp_path, {"NX_VOYAGE_API_KEY": _FAKE_KEY}, "python3", "-c", _PROBE)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "||-"
+    r = _sandbox_run(tmp_path, {"NX_VOYAGE_API_KEY": _FAKE_KEY, "HERB_SANDBOX_VOYAGE": "1"},
+                     "python3", "-c", _PROBE)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "set|set|0o600"
+    assert _FAKE_KEY not in r.stdout + r.stderr
+    assert list((tmp_path / "tmp").iterdir()) == []
+
+
+def test_voyage_opt_in_without_a_key_refuses(tmp_path):
+    r = _sandbox_run(tmp_path, {"HERB_SANDBOX_VOYAGE": "1"}, "true")
+    assert r.returncode != 0
+    assert "NX_VOYAGE_API_KEY" in r.stderr
+
+
+def test_voyage_key_never_in_the_env_allowlist_listing(tmp_path):
+    """The allowlist array (what env(1) would receive as argv) never carries the key, opted in or not."""
+    r = subprocess.run(["bash", str(REPO / "benchmark" / "herb_sandbox.sh"), "--self-test"],
+                       capture_output=True, text=True, timeout=60,
+                       env={"PATH": os.environ["PATH"], "HOME": str(tmp_path),
+                            "HERB_SANDBOX_VOYAGE": "1", "NX_VOYAGE_API_KEY": _FAKE_KEY})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "self-test: OK" in r.stdout

@@ -225,7 +225,12 @@ def sandbox_guard(*, allow_llm_token: bool) -> Path:
     cfg = os.environ.get("NEXUS_CONFIG_DIR", "")
     if ".herb-sandbox" not in cfg:
         problems.append(f"NEXUS_CONFIG_DIR {cfg!r} is not under a .herb-sandbox")
+    # VOYAGE_API_KEY reaches a child only through the wrapper's explicit HERB_SANDBOX_VOYAGE=1 opt-in
+    # (arm B); the other ambient keys are never excused.
+    voyage_opt_in = os.environ.get("HERB_SANDBOX_VOYAGE") == "1"
     for k in ("NX_SERVICE_URL", "NX_SERVICE_TOKEN", "VOYAGE_API_KEY", "ANTHROPIC_API_KEY"):
+        if k == "VOYAGE_API_KEY" and voyage_opt_in:
+            continue
         if os.environ.get(k):
             problems.append(f"{k} is set")
     has_token = bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"))
