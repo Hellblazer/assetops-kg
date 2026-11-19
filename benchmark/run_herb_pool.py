@@ -845,6 +845,9 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("--claude-bin", default=None)
     sc.add_argument("--no-regex", action="store_true", help="skip the secondary regex scorer")
     sc.set_defaults(fn=cmd_score)
+    from benchmark import herb_plan  # noqa: PLC0415  part 1 of the plan experiment (lazy: it imports this module)
+
+    herb_plan.add_subcommands(sub)
     return ap
 
 
