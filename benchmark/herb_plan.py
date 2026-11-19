@@ -202,7 +202,8 @@ def is_decline(text: str | None) -> bool:
 
 
 def summarize_readout(questions: list[dict[str, Any]], plan_f1: dict[str, float], stock_f1: dict[str, float],
-                      rows: dict[tuple[str, int], dict[str, Any]]) -> dict[str, Any]:
+                      rows: dict[tuple[str, int], dict[str, Any]],
+                      stock_rows: dict[tuple[str, int], dict[str, Any]] | None = None) -> dict[str, Any]:
     """Cust (mean F1 x100) for the plan run and the stock run over the same questions, overall and per shape,
     with the plan run's decline counts. ``plan_f1``/``stock_f1`` map ``product#index`` to F1."""
     def mean(vals: list[float]) -> float:
@@ -211,16 +212,21 @@ def summarize_readout(questions: list[dict[str, Any]], plan_f1: dict[str, float]
     keys = [f"{q['product']}#{q['index']}" for q in questions]
     out: dict[str, Any] = {"overall": {"n": len(keys), "plan": mean([plan_f1.get(k, 0.0) for k in keys]),
                                        "stock": mean([stock_f1.get(k, 0.0) for k in keys])}, "shapes": {}}
-    out["overall"]["plan_declines"] = sum(
-        is_decline((rows.get((q["product"], q["index"])) or {}).get("final_text")) for q in questions)
+    def declines(qlist: list[dict[str, Any]], r: dict[tuple[str, int], dict[str, Any]]) -> int:
+        return sum(is_decline((r.get((q["product"], q["index"])) or {}).get("final_text")) for q in qlist)
+
+    out["overall"]["plan_declines"] = declines(questions, rows)
+    if stock_rows is not None:
+        out["overall"]["stock_declines"] = declines(questions, stock_rows)
     for shape in ("affected", "max-count", "prev-release"):
         sq = [q for q in questions if shape_of(q["question"]) == shape]
         sk = [f"{q['product']}#{q['index']}" for q in sq]
         out["shapes"][shape] = {
             "n": len(sq), "plan": mean([plan_f1.get(k, 0.0) for k in sk]),
             "stock": mean([stock_f1.get(k, 0.0) for k in sk]),
-            "plan_declines": sum(is_decline((rows.get((q["product"], q["index"])) or {}).get("final_text"))
-                                 for q in sq)}
+            "plan_declines": declines(sq, rows)}
+        if stock_rows is not None:
+            out["shapes"][shape]["stock_declines"] = declines(sq, stock_rows)
     return out
 
 
@@ -560,7 +566,12 @@ def cmd_plan_score(args: Any) -> int:
         k = f"{q['product']}#{q['index']}"
         if k not in rerun_keys:
             plan_f1[k] = stock_f1.get(k, 0.0)
-    summary = summarize_readout(qs, plan_f1, stock_f1, rows)
+    stock_rows = hp.load_answers(Path(args.stock_dir) / "answers.jsonl")
+    eff_rows = {**{(q["product"], q["index"]): stock_rows.get((q["product"], q["index"]), {}) for q in qs},
+                **{(q["product"], q["index"]): rows[(q["product"], q["index"])] for q in rerun}}
+    summary = summarize_readout(qs, plan_f1, stock_f1, eff_rows, stock_rows)
+    summary["rerun_declines"] = {"plan": sum(is_decline(rows[(q["product"], q["index"])].get("final_text")) for q in rerun),
+                                 "stock": sum(is_decline(stock_rows.get((q["product"], q["index"]), {}).get("final_text")) for q in rerun)}
     summary["merged_note"] = ("non-routed questions carry the stock run's row (identical code, not rerun)"
                               if not args.only_answered else "routed-only DEV run")
     summary["rerun"] = {"n": len(rerun), "routed_in_split": sum(1 for q in qs if route_question(q["question"])),
