@@ -424,3 +424,54 @@ def test_control_answer_fn_logs_plan_id_and_sets_coverage_off(tmp_path, monkeypa
     assert os.environ.get("NX_ANSWER_COVERAGE") is None  # restored after the call
     meta = json.loads((tmp_path / "meta.jsonl").read_text().splitlines()[0])
     assert meta == {"key": "P#0", "plan_id": 10, "coverage_state": "unassessed"}
+
+
+# --------------------------------------------------------------------------- part 2: inline plan composition
+
+
+def _plan(*steps):
+    return json.dumps({"steps": list(steps)})
+
+
+def test_composition_of_the_part_1_shape_has_all_three():
+    c = hpl.plan_composition(json.dumps(hpl.PLAN).replace("$entity_query", "CUST company"), "CUST")
+    assert c["entity"] and c["join"] and c["aggregation"] and c["aggregation_strict"]
+
+
+def test_composition_without_entity_records_or_aggregation():
+    p = _plan({"tool": "search", "args": {"query": "bugs in the product", "corpus": "c"}},
+              {"tool": "store_get_many", "args": {"ids": "$step1.ids", "collections": "$step1.collections"}},
+              {"tool": "summarize", "args": {"content": "$step2.contents"}})
+    c = hpl.plan_composition(p, "CUST")
+    assert (c["entity"], c["join"], c["aggregation"], c["aggregation_strict"]) == (False, False, False, False)
+
+
+def test_composition_join_needs_an_operator_that_reads_both_streams():
+    p = _plan({"tool": "search", "args": {"query": "P bug impacting customer CUST", "lexical": True}},
+              {"tool": "store_get_many", "args": {"ids": "$step1.ids", "collections": "$step1.collections"}},
+              {"tool": "search", "args": {"query": "CUST company", "lexical": True}},
+              {"tool": "store_get_many", "args": {"ids": "$step3.ids", "collections": "$step3.collections"}},
+              {"tool": "summarize", "args": {"content": "$step2.contents"}})  # reads records only
+    c = hpl.plan_composition(p, "CUST")
+    assert c["entity"] is True and c["join"] is False
+    p2 = _plan(*json.loads(p)["steps"][:4],
+               {"tool": "generate", "args": {"template": "t", "context": ["$step2.contents", "$step4.contents"]}})
+    assert hpl.plan_composition(p2, "CUST")["join"] is True
+
+
+def test_composition_aggregation_cue_without_groupby():
+    p = _plan({"tool": "search", "args": {"query": "x"}},
+              {"tool": "generate", "args": {"template": "name the company with the most bugs", "context": "$step1.ids"}})
+    c = hpl.plan_composition(p, "CUST")
+    assert c["aggregation"] is True and c["aggregation_strict"] is False
+
+
+def test_composition_of_unparseable_plan_is_all_false():
+    c = hpl.plan_composition("not json", "CUST")
+    assert c["entity"] is False and c["steps"] == 0
+
+
+def test_planner_driver_sets_the_sandbox_only_patch_and_forces_inline_planning():
+    src = hpl._PLANNER_DRIVER
+    assert "force_dynamic=True" in src and "NX_ANSWER_CORPUS_PROFILE" in src and "NX_ANSWER_PLAN_LOG" in src
+    assert 'NX_ANSWER_COVERAGE"] = "0"' in src

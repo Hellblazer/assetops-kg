@@ -642,9 +642,143 @@ def cmd_stock_control(args: Any) -> int:
     return 0 if stats["stopped"] is None else 3
 
 
+# --------------------------------------------------------------------------- part 2: the inline planner
+
+#: Part 2 of the plan experiment (addendum 4): nx_answer with planning forced inline (force_dynamic skips the
+#: plan-match gate, so no library plan can serve), a corpus profile in the planner prompt, and the sandbox-only
+#: nexus patch (a copy of the installed package placed first on sys.path; the diff is recorded). The plan the
+#: planner produced is logged by the patch to NX_ANSWER_PLAN_LOG.
+_PLANNER_DRIVER = """
+import asyncio, json, os, sys
+sys.path.insert(0, sys.argv[3])   # the sandbox-only patched copy of the nexus package
+os.environ.pop("NX_ANSWER_POOL_KEY_SCAN", None)
+os.environ["NX_ASPECT_WORKER_AUTOSTART"] = "0"
+os.environ["NX_ANSWER_COVERAGE"] = "0"   # parity with part 1's plan calls
+os.environ["NX_ANSWER_CORPUS_PROFILE"] = sys.argv[4]
+os.environ["NX_ANSWER_PLAN_LOG"] = sys.argv[5]
+import nexus.mcp.core as _core
+assert _core.__file__.startswith(sys.argv[3]), _core.__file__
+_core._load_ad_hoc_ttl = lambda: 0       # no plan is grown into the library
+from nexus.mcp.core import nx_answer
+async def go():
+    r = await nx_answer(question=sys.argv[1], scope=sys.argv[2], structured=True, force_dynamic=True, max_steps=10)
+    if isinstance(r, dict):
+        out = {k: r.get(k) for k in ("final_text", "cost_usd", "duration_ms", "plan_id", "step_count", "answer_shape")}
+        out["coverage_state"] = (r.get("coverage") or {}).get("state")
+    else:
+        out = {"final_text": r, "cost_usd": None, "duration_ms": None}
+    print("@@HERBP2@@" + json.dumps(out, default=str))
+asyncio.run(go())
+"""
+
+_RETRIEVAL_TOOLS = ("search", "query", "traverse", "resolve")
+_OPERATOR_TOOLS = ("generate", "extract", "groupby", "aggregate", "rank", "compare", "summarize", "filter",
+                   "check", "verify")
+_AGG_CUE = re.compile(r"\b(count|counts|most|maximum|highest|largest|number of|tally)\b", re.IGNORECASE)
+
+
+def _step_refs(value: Any) -> set[int]:
+    return {int(m) for m in re.findall(r"\$step(\d+)\.", json.dumps(value))}
+
+
+def plan_composition(plan_json: str, prefix: str) -> dict[str, Any]:
+    """What an inline plan composed: entity records (a retrieval step that asks for the entity key's records:
+    its query holds the key prefix and 'company' or 'contact' and no bug, issue or report word), the key join (an operator whose inputs, through
+    its step references, reach both an entity stream and another retrieval stream), and aggregation (a groupby or
+    aggregate step: strict; or an operator whose text asks for a count or a maximum: cue)."""
+    try:
+        steps = json.loads(plan_json)["steps"]
+    except (ValueError, KeyError, TypeError):
+        return {"steps": 0, "tools": [], "entity": False, "join": False, "aggregation": False,
+                "aggregation_strict": False}
+    tools = [s.get("tool") for s in steps]
+    entity: set[int] = set()
+    retrieval: set[int] = set()
+    for i, s in enumerate(steps, start=1):
+        if s.get("tool") in _RETRIEVAL_TOOLS:
+            retrieval.add(i)
+            q = str((s.get("args") or {}).get("query") or (s.get("args") or {}).get("question") or "").lower()
+            if s.get("tool") == "resolve" or (
+                    prefix.lower() in q and ("company" in q or "contact" in q)
+                    and not re.search(r"\b(bug|bugs|issue|issues|report|reported)\b", q)):
+                entity.add(i)
+
+    def reach(i: int, seen: set[int] | None = None) -> set[int]:
+        seen = set() if seen is None else seen
+        for r in _step_refs(steps[i - 1].get("args")):
+            if r not in seen and 1 <= r < i:
+                seen.add(r)
+                reach(r, seen)
+        return seen
+
+    join = False
+    for i, s in enumerate(steps, start=1):
+        if s.get("tool") in _OPERATOR_TOOLS:
+            r = reach(i)
+            if (r & entity) and (r & (retrieval - entity)):
+                join = True
+    strict = any(t in ("groupby", "aggregate") for t in tools)
+    cue = any(s.get("tool") in _OPERATOR_TOOLS and _AGG_CUE.search(json.dumps(s.get("args") or {})) for s in steps)
+    return {"steps": len(steps), "tools": tools, "entity": bool(entity), "join": join,
+            "aggregation": strict or cue, "aggregation_strict": strict}
+
+
+def nx_answer_planner_subprocess(question: str, scope: str, *, patched_dir: str, profile_file: str,
+                                 plan_log: str) -> dict[str, Any]:
+    import subprocess
+
+    from benchmark import run_herb as rh
+    from benchmark.multihop_resolve import NxError
+
+    try:
+        p = subprocess.run([str(rh.CONEXUS_PYTHON), "-c", _PLANNER_DRIVER, question, scope, patched_dir,
+                            profile_file, plan_log], capture_output=True, timeout=hp.ANSWER_TIMEOUT_S, check=True)
+    except subprocess.CalledProcessError as e:
+        raise NxError(f"exit {e.returncode}: {(e.stderr or b'').decode(errors='replace')[-500:]}") from e
+    except subprocess.TimeoutExpired as e:
+        raise NxError(f"timeout after {hp.ANSWER_TIMEOUT_S}s") from e
+    for line in p.stdout.decode().splitlines():
+        if line.startswith("@@HERBP2@@"):
+            return json.loads(line[len("@@HERBP2@@"):])
+    raise NxError("no envelope on stdout")
+
+
+def cmd_planner_answer(args: Any) -> int:
+    hp.sandbox_guard(allow_llm_token=True)
+    out = Path(args.out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    herb_dir = Path(args.herb_dir).expanduser()
+    allq = hp.company_questions(hp.load_products(herb_dir))
+    if args.subset_file:
+        keys = json.loads(Path(args.subset_file).read_text())["keys"]
+        qs = control_questions(select_products(allq, DEV_PRODUCTS, invert=True), keys)
+    else:  # DEV pilot: a seeded sample of the routed DEV questions
+        routed = [q for q in select_products(allq, DEV_PRODUCTS) if route_question(q["question"])]
+        keys = seeded_subset([f"{q['product']}#{q['index']}" for q in routed], args.dev_n, seed=args.dev_seed)
+        qs = control_questions(routed, keys)
+    if not qs or len(qs) != len(keys):
+        hp.console.print(f"[red]{len(keys)} keys, {len(qs)} questions[/red]")
+        return 2
+    plan_log = str(out / "plans.jsonl")
+    (out / "keys.json").write_text(json.dumps({"keys": keys}))
+    fn = lambda q, s: nx_answer_planner_subprocess(  # noqa: E731
+        q, s, patched_dir=args.patched_dir, profile_file=args.profile_file, plan_log=plan_log)
+    stats = hp.run_answers(qs, out, fn, cap=args.cap_usd, held_back=0.0)
+    hp.console.print(stats)
+    return 0 if stats["stopped"] is None else 3
+
+
 def add_subcommands(sub: Any) -> None:
     pi = sub.add_parser("plan-install", help="save the part-1 plan into the sandbox plan library (free)")
     pi.set_defaults(fn=cmd_plan_install)
+    pp = sub.add_parser("planner-answer", help="part 2: inline planner with a corpus profile, forced inline (PAID)")
+    pp.add_argument("--profile-file", required=True)
+    pp.add_argument("--patched-dir", required=True)
+    pp.add_argument("--subset-file", default=None, help="TEST subset keys; omit for a seeded DEV pilot")
+    pp.add_argument("--dev-n", type=int, default=4)
+    pp.add_argument("--dev-seed", type=int, default=BOOTSTRAP_SEED)
+    pp.add_argument("--cap-usd", type=float, required=True)
+    pp.set_defaults(fn=cmd_planner_answer)
     sc = sub.add_parser("stock-control", help="stock path, no pin, NX_ANSWER_COVERAGE=0, on the pre-declared subset (PAID)")
     sc.add_argument("--subset-file", required=True)
     sc.add_argument("--cap-usd", type=float, required=True)
