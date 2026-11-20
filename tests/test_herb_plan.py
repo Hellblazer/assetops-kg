@@ -475,3 +475,11 @@ def test_planner_driver_sets_the_sandbox_only_patch_and_forces_inline_planning()
     src = hpl._PLANNER_DRIVER
     assert "force_dynamic=True" in src and "NX_ANSWER_CORPUS_PROFILE" in src and "NX_ANSWER_PLAN_LOG" in src
     assert 'NX_ANSWER_COVERAGE"] = "0"' in src
+
+
+def test_seeded_order_is_a_reproducible_permutation():
+    items = list(range(30))
+    a = hpl.seeded_order(items, seed=20261119)
+    assert a == hpl.seeded_order(items, seed=20261119)
+    assert sorted(a) == items and a != items
+    assert items == list(range(30))  # input untouched

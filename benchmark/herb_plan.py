@@ -283,6 +283,16 @@ def seeded_subset(items: list[Any], n: int, *, seed: int) -> list[Any]:
     return [x for i, x in enumerate(items) if i in keep]
 
 
+def seeded_order(items: list[Any], *, seed: int) -> list[Any]:
+    """A reproducible random permutation (the input is not changed): a run that stops at its cap has then
+    answered a random subset, not the alphabetical head."""
+    import random
+
+    out = list(items)
+    random.Random(seed).shuffle(out)
+    return out
+
+
 def _paired_block(diffs: list[float], n_resamples: int, seed: int) -> dict[str, Any]:
     mean, lo, hi = paired_bootstrap(diffs, n_resamples=n_resamples, seed=seed)
     w, t, l = win_tie_loss(diffs)
@@ -759,6 +769,8 @@ def cmd_planner_answer(args: Any) -> int:
     if not qs or len(qs) != len(keys):
         hp.console.print(f"[red]{len(keys)} keys, {len(qs)} questions[/red]")
         return 2
+    if args.shuffle_seed is not None:
+        qs = seeded_order(qs, seed=args.shuffle_seed)
     plan_log = str(out / "plans.jsonl")
     (out / "keys.json").write_text(json.dumps({"keys": keys}))
     fn = lambda q, s: nx_answer_planner_subprocess(  # noqa: E731
@@ -775,6 +787,7 @@ def add_subcommands(sub: Any) -> None:
     pp.add_argument("--profile-file", required=True)
     pp.add_argument("--patched-dir", required=True)
     pp.add_argument("--subset-file", default=None, help="TEST subset keys; omit for a seeded DEV pilot")
+    pp.add_argument("--shuffle-seed", type=int, default=None, help="run in a seeded random order")
     pp.add_argument("--dev-n", type=int, default=4)
     pp.add_argument("--dev-seed", type=int, default=BOOTSTRAP_SEED)
     pp.add_argument("--cap-usd", type=float, required=True)
