@@ -397,3 +397,30 @@ def test_paired_report_per_shape_marks_ci_crossing_zero_inconclusive():
     assert rep["shapes"]["max-count"]["verdict"] == "plan better"
     assert rep["shapes"]["prev-release"]["verdict"] == "inconclusive"
     assert rep["shapes"]["max-count"]["wtl"] == [6, 0, 0]
+
+
+# --------------------------------------------------------------------------- stock coverage-off control
+
+
+def test_control_questions_are_the_subset_in_question_order():
+    qs = _qs()
+    got = hpl.control_questions(qs, ["Q#0", "P#0"])
+    assert [(q["product"], q["index"]) for q in got] == [("P", 0), ("Q", 0)]
+    assert hpl.control_questions(qs, []) == []
+
+
+def test_control_answer_fn_logs_plan_id_and_sets_coverage_off(tmp_path, monkeypatch):
+    import os
+    seen = {}
+
+    def inner(question, scope):
+        seen["cov"] = os.environ.get("NX_ANSWER_COVERAGE")
+        return {"final_text": "x", "cost_usd": 0.01, "plan_id": 10, "coverage_state": "unassessed"}
+
+    monkeypatch.delenv("NX_ANSWER_COVERAGE", raising=False)
+    fn = hpl.control_answer_fn(inner, tmp_path / "meta.jsonl", {AGG: "P#0"})
+    env = fn(AGG, "knowledge__herb-pool")
+    assert env["plan_id"] == 10 and seen["cov"] == "0"
+    assert os.environ.get("NX_ANSWER_COVERAGE") is None  # restored after the call
+    meta = json.loads((tmp_path / "meta.jsonl").read_text().splitlines()[0])
+    assert meta == {"key": "P#0", "plan_id": 10, "coverage_state": "unassessed"}

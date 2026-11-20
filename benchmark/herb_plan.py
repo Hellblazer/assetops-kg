@@ -589,9 +589,66 @@ def cmd_plan_score(args: Any) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------- stock coverage-off control (addendum 3)
+
+
+def control_questions(questions: list[dict[str, Any]], keys: list[str]) -> list[dict[str, Any]]:
+    keep = set(keys)
+    return [q for q in questions if f"{q['product']}#{q['index']}" in keep]
+
+
+def control_answer_fn(inner: StockFn, meta_path: Path, key_of: dict[str, str]) -> StockFn:
+    """The stock answer call with NX_ANSWER_COVERAGE=0 for the call, logging each envelope's plan_id and coverage
+    state beside the question key (the answers file does not carry them)."""
+    import os
+
+    def fn(question: str, scope: str) -> dict[str, Any]:
+        prior = os.environ.get("NX_ANSWER_COVERAGE")
+        os.environ["NX_ANSWER_COVERAGE"] = "0"
+        try:
+            env = inner(question, scope)
+        finally:
+            if prior is None:
+                os.environ.pop("NX_ANSWER_COVERAGE", None)
+            else:
+                os.environ["NX_ANSWER_COVERAGE"] = prior
+        with meta_path.open("a") as f:
+            f.write(json.dumps({"key": key_of.get(question), "plan_id": env.get("plan_id"),
+                                "coverage_state": env.get("coverage_state")}) + "\n")
+        return env
+
+    return fn
+
+
+def cmd_stock_control(args: Any) -> int:
+    import os
+
+    hp.sandbox_guard(allow_llm_token=True)
+    if not os.environ.get("HERB_NEXUS_REV"):
+        hp.console.print("[red]HERB_NEXUS_REV is not set[/red]")
+        return 2
+    keys = json.loads(Path(args.subset_file).read_text())["keys"]
+    qs = control_questions(select_products(hp.company_questions(hp.load_products(Path(args.herb_dir).expanduser())),
+                                           DEV_PRODUCTS, invert=True), keys)
+    if len(qs) != len(keys):
+        hp.console.print(f"[red]subset has {len(keys)} keys but {len(qs)} questions matched[/red]")
+        return 2
+    out = Path(args.out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    key_of = {q["question"]: f"{q['product']}#{q['index']}" for q in qs}
+    fn = control_answer_fn(lambda q, s: hp.nx_answer_subprocess(q, s), out / "meta.jsonl", key_of)
+    stats = hp.run_answers(qs, out, fn, cap=args.cap_usd, held_back=0.0)
+    hp.console.print(stats)
+    return 0 if stats["stopped"] is None else 3
+
+
 def add_subcommands(sub: Any) -> None:
     pi = sub.add_parser("plan-install", help="save the part-1 plan into the sandbox plan library (free)")
     pi.set_defaults(fn=cmd_plan_install)
+    sc = sub.add_parser("stock-control", help="stock path, no pin, NX_ANSWER_COVERAGE=0, on the pre-declared subset (PAID)")
+    sc.add_argument("--subset-file", required=True)
+    sc.add_argument("--cap-usd", type=float, required=True)
+    sc.set_defaults(fn=cmd_stock_control)
     pa = sub.add_parser("plan-answer", help="rule-routed questions on the pinned plan, the rest stock (PAID)")
     pa.add_argument("--split", choices=["dev", "test"], required=True)
     pa.add_argument("--cap-usd", type=float, required=True)
